@@ -1,0 +1,36 @@
+{
+  "name": "clarify-backend",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.cjs",
+    "build": "esbuild src/index.ts --bundle --platform=node --format=cjs --packages=external --outfile=dist/index.cjs",
+    "lint": "tsc --noEmit",
+    "test:db": "tsx src/db.test.ts"
+  },
+  "dependencies": {
+    "@google/genai": "^2.10.0",
+    "bcryptjs": "^3.0.3",
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "jsonwebtoken": "^9.0.3",
+    "pg": "^8.22.0",
+    "ws": "^8.21.0"
+  },
+  "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "@types/jsonwebtoken": "^9.0.10",
+    "@types/node": "^26.0.1",
+    "@types/pg": "^8.20.0",
+    "@types/ws": "^8.18.1",
+    "esbuild": "^0.28.1",
+    "pg-mem": "^3.0.14",
+    "tsx": "^4.22.4",
+    "typescript": "^6.0.3"
+  }
+}
