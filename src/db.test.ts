@@ -14,8 +14,11 @@ import {
   updateUser,
   addMessage,
   getMessages,
-  cacheGet,
-  cacheSet,
+  cacheGetByKey,
+  cacheUpsertFull,
+  knowledgeInsert,
+  knowledgeCount,
+  knowledgeAll,
   rowToUser,
   DEFAULT_CHAPTERS,
 } from "./db.js";
@@ -77,10 +80,16 @@ function assert(cond: any, label: string) {
   const msgs = await getMessages(q, row.id, 50);
   assert(msgs.length === 1, "messages append + dedupe by id");
 
-  await cacheSet(q, "k1", { text: "cached answer", sources: [{ title: "T", uri: "u" }] });
-  await cacheSet(q, "k1", { text: "updated answer", sources: [] }); // upsert
-  const cached = await cacheGet(q, "k1");
-  assert(cached && cached.text === "updated answer", "explanation cache upsert + read");
+  const facets = { mode: "standard", board: "JEE", grade: "12th", language: "English", preferredAnalogy: "Daily Life" };
+  await cacheUpsertFull(q, { cacheKey: "k1", ...facets, question: "what is inertia", embedding: [0.1, 0.2, 0.3], text: "cached answer", sources: [{ title: "T", uri: "u" }] });
+  await cacheUpsertFull(q, { cacheKey: "k1", ...facets, question: "what is inertia", embedding: [0.1, 0.2, 0.3], text: "updated answer", sources: [] }); // upsert
+  const cached = await cacheGetByKey(q, "k1");
+  assert(cached && cached.text === "updated answer", "explanation cache upsert + read by key");
+
+  await knowledgeInsert(q, { id: "kc1", subject: "Physics", topic: "Inertia", board: "CBSE", grade: "11", content: "Inertia note", embedding: [0.1, 0.2, 0.3] });
+  assert((await knowledgeCount(q)) === 1, "knowledge insert + count");
+  const chunks = await knowledgeAll(q);
+  assert(chunks.length === 1 && Array.isArray(chunks[0].embedding), "knowledge embedding round-trips as a JS array");
 
   console.log("\nDB SMOKE TEST PASSED ✓");
   process.exit(0);

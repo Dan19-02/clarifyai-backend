@@ -93,9 +93,26 @@ CREATE INDEX IF NOT EXISTS idx_messages_user ON messages(user_id, created_at);
 
 CREATE TABLE IF NOT EXISTS explanation_cache (
   cache_key TEXT PRIMARY KEY,
+  mode TEXT,
+  board TEXT,
+  grade TEXT,
+  language TEXT,
+  preferred_analogy TEXT,
+  question TEXT,
+  embedding JSONB,
   text TEXT NOT NULL,
   sources JSONB NOT NULL DEFAULT '[]'::jsonb,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS knowledge_chunks (
+  id TEXT PRIMARY KEY,
+  subject TEXT,
+  topic TEXT,
+  board TEXT,
+  grade TEXT,
+  content TEXT NOT NULL,
+  embedding JSONB NOT NULL
 );
 `;
 
@@ -236,17 +253,91 @@ export interface CachedAnswer {
   sources: { title: string; uri: string }[];
 }
 
-export async function cacheGet(q: Queryable, key: string): Promise<CachedAnswer | null> {
+export interface CacheFacets {
+  mode: string;
+  board?: string;
+  grade?: string;
+  language?: string;
+  preferredAnalogy?: string;
+}
+
+/** Exact cache lookup by hashed key. */
+export async function cacheGetByKey(q: Queryable, key: string): Promise<CachedAnswer | null> {
   const { rows } = await q.query(`SELECT text, sources FROM explanation_cache WHERE cache_key = $1`, [key]);
   if (!rows[0]) return null;
   return { text: rows[0].text, sources: rows[0].sources || [] };
 }
 
-export async function cacheSet(q: Queryable, key: string, value: CachedAnswer): Promise<void> {
-  await q.query(
-    `INSERT INTO explanation_cache (cache_key, text, sources)
-     VALUES ($1,$2,$3)
-     ON CONFLICT (cache_key) DO UPDATE SET text = EXCLUDED.text, sources = EXCLUDED.sources`,
-    [key, value.text, JSON.stringify(value.sources || [])]
+/** Candidate cache rows (same facets) for semantic (embedding) matching. */
+export async function cacheCandidates(
+  q: Queryable,
+  f: CacheFacets
+): Promise<{ embedding: number[] | null; text: string; sources: any[] }[]> {
+  const { rows } = await q.query(
+    `SELECT embedding, text, sources FROM explanation_cache
+     WHERE mode = $1 AND board = $2 AND grade = $3 AND language = $4 AND preferred_analogy = $5
+       AND embedding IS NOT NULL
+     LIMIT 300`,
+    [f.mode, f.board ?? "", f.grade ?? "", f.language ?? "", f.preferredAnalogy ?? ""]
   );
+  return rows.map((r) => ({ embedding: r.embedding, text: r.text, sources: r.sources || [] }));
+}
+
+export interface CacheUpsert extends CacheFacets {
+  cacheKey: string;
+  question: string;
+  embedding: number[] | null;
+  text: string;
+  sources: any[];
+}
+
+export async function cacheUpsertFull(q: Queryable, r: CacheUpsert): Promise<void> {
+  await q.query(
+    `INSERT INTO explanation_cache (cache_key, mode, board, grade, language, preferred_analogy, question, embedding, text, sources)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+     ON CONFLICT (cache_key) DO UPDATE SET text = EXCLUDED.text, sources = EXCLUDED.sources, embedding = EXCLUDED.embedding`,
+    [
+      r.cacheKey,
+      r.mode,
+      r.board ?? "",
+      r.grade ?? "",
+      r.language ?? "",
+      r.preferredAnalogy ?? "",
+      r.question,
+      r.embedding ? JSON.stringify(r.embedding) : null,
+      r.text,
+      JSON.stringify(r.sources || []),
+    ]
+  );
+}
+
+// ---- Knowledge base (RAG) ----
+export interface KnowledgeChunk {
+  id: string;
+  subject: string;
+  topic: string;
+  board: string;
+  grade: string;
+  content: string;
+  embedding: number[];
+}
+
+export async function knowledgeCount(q: Queryable): Promise<number> {
+  const { rows } = await q.query(`SELECT count(*) AS n FROM knowledge_chunks`);
+  return Number(rows[0]?.n || 0);
+}
+
+export async function knowledgeInsert(q: Queryable, c: KnowledgeChunk): Promise<void> {
+  await q.query(
+    `INSERT INTO knowledge_chunks (id, subject, topic, board, grade, content, embedding)
+     VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (id) DO NOTHING`,
+    [c.id, c.subject, c.topic, c.board, c.grade, c.content, JSON.stringify(c.embedding)]
+  );
+}
+
+export async function knowledgeAll(
+  q: Queryable
+): Promise<{ subject: string; topic: string; content: string; embedding: number[] }[]> {
+  const { rows } = await q.query(`SELECT subject, topic, content, embedding FROM knowledge_chunks`);
+  return rows.map((r) => ({ subject: r.subject, topic: r.topic, content: r.content, embedding: r.embedding }));
 }

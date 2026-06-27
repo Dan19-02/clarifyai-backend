@@ -8,19 +8,22 @@ import type { Request, Response } from "express";
 import http from "http";
 import crypto from "crypto";
 import { WebSocketServer, WebSocket } from "ws";
-import { GoogleGenAI, Modality } from "@google/genai";
+import { Modality } from "@google/genai";
 import { requireAuth, userIdFromToken } from "./auth.js";
-import { pool, cacheGet as dbCacheGet, cacheSet as dbCacheSet, type CachedAnswer } from "./db.js";
+import {
+  pool,
+  cacheGetByKey,
+  cacheCandidates,
+  cacheUpsertFull,
+  type CachedAnswer,
+  type CacheFacets,
+} from "./db.js";
+import { ai, apiKey } from "./gemini.js";
+import { embed, cosine, retrieveContext, verifyAnswer } from "./knowledge.js";
 
-const apiKey = process.env.GEMINI_API_KEY;
 if (!apiKey) {
   console.warn("[AI] GEMINI_API_KEY missing — chat/tts/image/live will error until it is set.");
 }
-
-const ai = new GoogleGenAI({
-  apiKey: apiKey || "",
-  httpOptions: { headers: { "User-Agent": "aistudio-build" } },
-});
 
 // ---- Optional open-source generation backend (OpenAI-compatible) ----
 const osBaseUrl = process.env.OPENSOURCE_BASE_URL;
@@ -41,6 +44,7 @@ function toOpenAIMessages(history: any, userContent: string) {
 async function callOpenSource(
   systemInstruction: string,
   messages: { role: string; content: string }[],
+  temperature = 0.7,
   timeoutMs = 60_000
 ): Promise<string> {
   const controller = new AbortController();
@@ -52,7 +56,7 @@ async function callOpenSource(
       body: JSON.stringify({
         model: osModel,
         messages: [{ role: "system", content: systemInstruction }, ...messages],
-        temperature: 0.7,
+        temperature,
         max_tokens: 8192,
         stream: false,
       }),
@@ -72,6 +76,11 @@ async function callOpenSource(
 // ---- Shared explanation cache (in-memory + Postgres) ----
 const memCache = new Map<string, CachedAnswer>();
 const MEM_CACHE_MAX = 1000;
+// Cosine threshold for semantic cache reuse. Conservative on purpose: a WRONG
+// reuse (e.g. osmosis answer for a diffusion question) hurts more than a miss.
+// text-embedding-004 paraphrases score ~0.81 and near-different concepts ~0.85,
+// so 0.90 only reuses near-identical rephrasings. Tunable via env w/ monitoring.
+const SEMANTIC_THRESHOLD = Number(process.env.SEMANTIC_THRESHOLD) || 0.9;
 
 function makeCacheKey(p: any): string {
   const norm = (s: string) => (s || "").toString().toLowerCase().replace(/\s+/g, " ").trim();
@@ -79,28 +88,12 @@ function makeCacheKey(p: any): string {
   return crypto.createHash("sha256").update(raw).digest("hex");
 }
 
-async function cacheGet(key: string): Promise<CachedAnswer | null> {
-  const inMem = memCache.get(key);
-  if (inMem) return inMem;
+/** Run a DB/cache call but never let a hiccup break the chat. */
+async function safe<T>(fn: () => Promise<T>): Promise<T | null> {
   try {
-    const fromDb = await dbCacheGet(pool, key);
-    if (fromDb) memCache.set(key, fromDb);
-    return fromDb;
+    return await fn();
   } catch {
     return null;
-  }
-}
-
-async function cacheSet(key: string, value: CachedAnswer): Promise<void> {
-  if (memCache.size >= MEM_CACHE_MAX) {
-    const oldest = memCache.keys().next().value;
-    if (oldest) memCache.delete(oldest);
-  }
-  memCache.set(key, value);
-  try {
-    await dbCacheSet(pool, key, value);
-  } catch {
-    /* best-effort */
   }
 }
 
@@ -157,7 +150,7 @@ A diagram the app will render. Use a Mermaid flowchart inside a \`\`\`mermaid co
 The proper definition / scientific or mathematical statement, made accessible. Use LaTeX for ALL math: inline like $v = u + at$, display like $$E = mc^2$$.
 
 6. ✏ Worked Example
-A fully solved, step-by-step example. Show each step and the reasoning. Use LaTeX for any math.
+A fully solved, step-by-step example. Show each step with its reasoning, then verify the final answer (check the units / recompute a key step). Use LaTeX for any math.
 
 7. ⚠ Common Mistakes
 The 2–3 misconceptions students usually have here, named gently and corrected.
@@ -178,10 +171,52 @@ LANGUAGE & CULTURE
 - Match the student's language preference exactly: Pure English, Hinglish (a natural Hindi+English mix, the way Indian students actually speak), or Hindi. Keep technical/scientific terms accurate in English even when speaking Hindi/Hinglish.
 - Prefer Indian, relatable examples and use ₹ for money.
 
-HARD RULES
-- Be accurate. Never invent facts, formulae, or exam data. If you are unsure, say so honestly and reason it through carefully.
+HARD RULES (accuracy is non-negotiable)
+- For ANY calculation, show every step and then DOUBLE-CHECK the final answer — verify the units and, where possible, plug it back in or recompute a key step. Only state the answer once you've checked it.
+- Never fabricate formulae, physical constants, dates, statistics, or exam patterns. If you are not fully certain, say "I'm not 100% sure" and reason it through carefully instead of guessing.
+- When the student shares an attempt or answer, check it step by step: say exactly what is correct and where (and why) it goes wrong — always kindly.
 - Concise but complete — enough to truly understand, never a wall of text.
 - Stay warm and encouraging from the first word to the last.`;
+
+// Heuristic auto-routing: pick the best path when the student leaves it on
+// "Standard" (most never switch). Math/derivations → reasoning ("thinking");
+// current-events / factual lookup → grounded Search; otherwise standard.
+function classifyQuery(message: string): "standard" | "thinking" | "search" {
+  const text = message || "";
+  const m = text.toLowerCase();
+
+  // Quantitative / multi-step reasoning → thinking. Checked first so a math
+  // problem that merely mentions a year isn't mistaken for current-events.
+  if (
+    /\b(solve|calculate|compute|evaluate|prove|derive|derivation|simplify|integrate|differentiate|factori[sz]e)\b/.test(m) ||
+    /\b(find|what is|determine)\b.*\b(value|sum|product|roots?|derivative|integral|probability|area|volume|equation)\b/.test(m) ||
+    /[∫√∑∏]/.test(text) ||
+    /\d\s*[+\-*/^]\s*\d/.test(text)
+  ) {
+    return "thinking";
+  }
+
+  // Current / real-time / factual lookup → grounded Search.
+  if (
+    /\b(latest|current|today|recent|nowadays|right now|live|this year|up to date|up-to-date)\b/.test(m) ||
+    /\b20[2-9]\d\b/.test(m) ||
+    /\bwho (won|is the (current|present)|holds)\b/.test(m) ||
+    /\b(price|cost) of\b/.test(m)
+  ) {
+    return "search";
+  }
+
+  return "standard";
+}
+
+// Appended to the system prompt for quantitative problems.
+const QUANT_ADDENDUM = `
+
+QUANTITATIVE / PROBLEM-SOLVING MODE — this question needs careful reasoning:
+- Work it out rigorously, showing EVERY step and the reason for each.
+- Use correct formulae and constants; if you use a constant (g, R, π, etc.), state its value.
+- After the final answer, RE-CHECK it: verify the units and recompute or plug back a key step, then state the verified final answer clearly.
+- If the problem is missing data or is ambiguous, say what's missing rather than assuming.`;
 
 export const aiRouter = Router();
 
@@ -194,40 +229,105 @@ aiRouter.post("/chat", requireAuth, async (req: Request, res: Response) => {
       return res.status(429).json({ error: "You're sending messages very fast. Take a breath and try again in a moment. 🌱" });
     }
 
+    // Auto-route when the student left it on the default "Standard" (most do).
+    const requestedMode = mode || "standard";
+    const effectiveMode = requestedMode === "standard" ? classifyQuery(message) : requestedMode;
+    const isQuant = effectiveMode === "thinking";
+    const temperature = isQuant ? 0.3 : 0.6; // low temp for math accuracy, warmer for explanations
+    if (requestedMode !== effectiveMode) console.log(`[AI] auto-routed: ${requestedMode} → ${effectiveMode}`);
+
     const cacheable =
-      (mode === "standard" || mode === "thinking") && (!Array.isArray(history) || history.length === 0);
-    const cacheKey = cacheable ? makeCacheKey({ mode, board, grade, language, preferredAnalogy, message }) : "";
+      (effectiveMode === "standard" || effectiveMode === "thinking") && (!Array.isArray(history) || history.length === 0);
+    const facets: CacheFacets = { mode: effectiveMode, board, grade, language, preferredAnalogy };
+    const cacheKey = cacheable ? makeCacheKey({ ...facets, message }) : "";
+    const deepVerify = req.body?.deepVerify === true;
+    let queryEmbedding: number[] | null = null;
 
     if (cacheable) {
-      const hit = await cacheGet(cacheKey);
-      if (hit) return res.json({ text: hit.text, sources: hit.sources || [], cached: true });
+      // 1) Exact cache hit (instant).
+      const exact = memCache.get(cacheKey) || (await safe(() => cacheGetByKey(pool, cacheKey)));
+      if (exact) {
+        memCache.set(cacheKey, exact);
+        return res.json({ text: exact.text, sources: exact.sources || [], cached: true });
+      }
+      // 2) Semantic cache: embed once (reused for RAG) and match near-duplicates.
+      queryEmbedding = await embed(message);
+      if (queryEmbedding) {
+        const candidates = (await safe(() => cacheCandidates(pool, facets))) || [];
+        let best: { text: string; sources: any[] } | null = null;
+        let bestScore = 0;
+        for (const c of candidates) {
+          if (!c.embedding) continue;
+          const s = cosine(queryEmbedding, c.embedding);
+          if (s > bestScore) {
+            bestScore = s;
+            best = c;
+          }
+        }
+        if (candidates.length) console.log(`[Cache] best semantic score ${bestScore.toFixed(3)} (threshold ${SEMANTIC_THRESHOLD})`);
+        if (best && bestScore >= SEMANTIC_THRESHOLD) {
+          console.log(`[Cache] semantic hit (score ${bestScore.toFixed(3)}).`);
+          return res.json({ text: best.text, sources: best.sources || [], cached: true });
+        }
+      }
     }
 
     const finish = async (text: string, sources: CachedAnswer["sources"]) => {
-      if (cacheable) await cacheSet(cacheKey, { text, sources: sources || [] });
-      res.json({ text, sources: sources || [] });
+      const finalText = deepVerify ? await verifyAnswer(message, text) : text;
+      if (cacheable) {
+        const value = { text: finalText, sources: sources || [] };
+        if (memCache.size >= MEM_CACHE_MAX) {
+          const oldest = memCache.keys().next().value;
+          if (oldest) memCache.delete(oldest);
+        }
+        memCache.set(cacheKey, value);
+        await safe(() =>
+          cacheUpsertFull(pool, {
+            cacheKey,
+            ...facets,
+            question: (message || "").toLowerCase().trim(),
+            embedding: queryEmbedding,
+            text: finalText,
+            sources: sources || [],
+          })
+        );
+      }
+      res.json({ text: finalText, sources: sources || [] });
     };
 
-    const needsGemini = !(mode === "thinking" && openSourceEnabled);
+    const needsGemini = !(effectiveMode === "thinking" && openSourceEnabled);
     if (!apiKey && needsGemini) {
       return res.status(500).json({ error: "GEMINI_API_KEY is missing on the server." });
     }
 
-    let modelName = "gemini-3.5-flash";
-    const config: any = {
-      systemInstruction: `${CLARIFY_SYSTEM_INSTRUCTION}
+    // RAG: pull the nearest NCERT-aligned notes (reuse the embedding from the
+    // semantic-cache step; first-turn, non-search questions only).
+    let referenceContext: string | null = null;
+    if (queryEmbedding && effectiveMode !== "search") {
+      referenceContext = await safe(() => retrieveContext(queryEmbedding));
+      if (referenceContext) console.log("[RAG] grounded answer with NCERT-aligned context.");
+    }
+
+    const systemInstruction =
+      `${CLARIFY_SYSTEM_INSTRUCTION}
 
 STUDENT CONTEXT (tailor the depth, examples, exam framing, and language to this):
 - Board/Exam Target: ${board || "General Study"}
 - Grade/Level: ${grade || "Not Specified"}
 - Language Preference: ${language || "English"}
-- Preferred Analogy Type: ${preferredAnalogy || "Daily Life"}`,
-    };
+- Preferred Analogy Type: ${preferredAnalogy || "Daily Life"}` +
+      (referenceContext
+        ? `\n\nREFERENCE MATERIAL (NCERT-aligned notes — prefer these for facts and definitions; if they don't cover the question, use your own knowledge):\n${referenceContext}`
+        : "") +
+      (isQuant ? QUANT_ADDENDUM : "");
 
-    if (mode === "thinking") {
+    let modelName = "gemini-3.5-flash";
+    const config: any = { systemInstruction, temperature };
+
+    if (effectiveMode === "thinking") {
       modelName = "gemini-3.1-pro-preview";
       config.thinkingConfig = { thinkingLevel: "HIGH" };
-    } else if (mode === "search") {
+    } else if (effectiveMode === "search") {
       modelName = "gemini-3.5-flash";
       config.tools = [{ googleSearch: {} }];
     }
@@ -238,10 +338,10 @@ STUDENT CONTEXT (tailor the depth, examples, exam framing, and language to this)
     }
     contents.push({ role: "user", parts: [{ text: message }] });
 
-    // Thinking mode → open-source model (skips expensive Gemini Pro).
-    if (mode === "thinking" && openSourceEnabled) {
+    // Thinking mode → open-source reasoning model (skips expensive Gemini Pro).
+    if (effectiveMode === "thinking" && openSourceEnabled) {
       try {
-        const text = await callOpenSource(config.systemInstruction, toOpenAIMessages(history, message));
+        const text = await callOpenSource(config.systemInstruction, toOpenAIMessages(history, message), temperature);
         return finish(text, []);
       } catch (osErr: any) {
         console.warn("[AI] thinking open-source failed, falling back to Gemini:", osErr.message);
@@ -271,12 +371,13 @@ STUDENT CONTEXT (tailor the depth, examples, exam framing, and language to this)
       groundingChunks?.map((c: any) => ({ title: c.web?.title || "Search Source", uri: c.web?.uri || "#" })) || [];
 
     // Search mode → Gemini grounded above; open-source model writes the answer.
-    if (mode === "search" && openSourceEnabled) {
+    if (effectiveMode === "search" && openSourceEnabled) {
       try {
         const augmented =
           `Here is up-to-date information gathered from a Google Search to help you answer accurately:\n\n"""\n${responseText}\n"""\n\n` +
-          `Using the information above where relevant (plus your own knowledge), respond to the student's request: ${message}`;
-        const text = await callOpenSource(config.systemInstruction, toOpenAIMessages(history, augmented));
+          `Treat the information above as the source of truth for any facts, names, dates, or numbers — do not contradict it or add unverified facts. ` +
+          `Now respond to the student's request: ${message}`;
+        const text = await callOpenSource(config.systemInstruction, toOpenAIMessages(history, augmented), 0.5);
         return finish(text, sources);
       } catch (osErr: any) {
         console.warn("[AI] search open-source failed, returning Gemini grounded answer:", osErr.message);

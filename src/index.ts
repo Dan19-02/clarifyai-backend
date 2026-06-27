@@ -7,6 +7,7 @@ import http from "http";
 import { initDb } from "./db.js";
 import { authRouter } from "./auth.js";
 import { aiRouter, attachLiveWebSocket } from "./ai.js";
+import { ingestKnowledge } from "./knowledge.js";
 
 const app = express();
 app.use(cors({ origin: process.env.CORS_ORIGIN || "*" }));
@@ -23,3 +24,6 @@ attachLiveWebSocket(server);
 
 await initDb();
 server.listen(PORT, () => console.log(`Clarify.AI backend running on http://localhost:${PORT}`));
+
+// Seed the RAG knowledge base in the background (doesn't block startup).
+ingestKnowledge().catch((e) => console.warn("[RAG] ingest error:", e.message));
