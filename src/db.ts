@@ -272,15 +272,15 @@ export async function cacheGetByKey(q: Queryable, key: string): Promise<CachedAn
 export async function cacheCandidates(
   q: Queryable,
   f: CacheFacets
-): Promise<{ embedding: number[] | null; text: string; sources: any[] }[]> {
+): Promise<{ embedding: number[] | null; text: string; sources: any[]; question: string }[]> {
   const { rows } = await q.query(
-    `SELECT embedding, text, sources FROM explanation_cache
+    `SELECT embedding, text, sources, question FROM explanation_cache
      WHERE mode = $1 AND board = $2 AND grade = $3 AND language = $4 AND preferred_analogy = $5
        AND embedding IS NOT NULL
      LIMIT 300`,
     [f.mode, f.board ?? "", f.grade ?? "", f.language ?? "", f.preferredAnalogy ?? ""]
   );
-  return rows.map((r) => ({ embedding: r.embedding, text: r.text, sources: r.sources || [] }));
+  return rows.map((r) => ({ embedding: r.embedding, text: r.text, sources: r.sources || [], question: r.question || "" }));
 }
 
 export interface CacheUpsert extends CacheFacets {
@@ -337,7 +337,7 @@ export async function knowledgeInsert(q: Queryable, c: KnowledgeChunk): Promise<
 
 export async function knowledgeAll(
   q: Queryable
-): Promise<{ subject: string; topic: string; content: string; embedding: number[] }[]> {
-  const { rows } = await q.query(`SELECT subject, topic, content, embedding FROM knowledge_chunks`);
-  return rows.map((r) => ({ subject: r.subject, topic: r.topic, content: r.content, embedding: r.embedding }));
+): Promise<{ subject: string; topic: string; board: string; content: string; embedding: number[] }[]> {
+  const { rows } = await q.query(`SELECT subject, topic, board, content, embedding FROM knowledge_chunks`);
+  return rows.map((r) => ({ subject: r.subject, topic: r.topic, board: r.board, content: r.content, embedding: r.embedding }));
 }

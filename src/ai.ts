@@ -19,7 +19,7 @@ import {
   type CacheFacets,
 } from "./db.js";
 import { ai, apiKey } from "./gemini.js";
-import { embed, cosine, retrieveContext, verifyAnswer } from "./knowledge.js";
+import { embed, cosine, retrieveContext, verifyAnswer, topicTokens, topicCompatible } from "./knowledge.js";
 
 if (!apiKey) {
   console.warn("[AI] GEMINI_API_KEY missing — chat/tts/image/live will error until it is set.");
@@ -253,18 +253,21 @@ aiRouter.post("/chat", requireAuth, async (req: Request, res: Response) => {
       // 2) Semantic cache: embed once (reused for RAG) and match near-duplicates.
       queryEmbedding = await embed(message);
       if (queryEmbedding) {
+        const qTokens = topicTokens(message);
         const candidates = (await safe(() => cacheCandidates(pool, facets))) || [];
         let best: { text: string; sources: any[] } | null = null;
         let bestScore = 0;
         for (const c of candidates) {
           if (!c.embedding) continue;
+          // Topic gate: only reuse across questions about the SAME thing.
+          if (!topicCompatible(qTokens, topicTokens(c.question))) continue;
           const s = cosine(queryEmbedding, c.embedding);
           if (s > bestScore) {
             bestScore = s;
             best = c;
           }
         }
-        if (candidates.length) console.log(`[Cache] best semantic score ${bestScore.toFixed(3)} (threshold ${SEMANTIC_THRESHOLD})`);
+        if (best) console.log(`[Cache] best topic-gated semantic score ${bestScore.toFixed(3)} (threshold ${SEMANTIC_THRESHOLD})`);
         if (best && bestScore >= SEMANTIC_THRESHOLD) {
           console.log(`[Cache] semantic hit (score ${bestScore.toFixed(3)}).`);
           return res.json({ text: best.text, sources: best.sources || [], cached: true });
@@ -304,8 +307,8 @@ aiRouter.post("/chat", requireAuth, async (req: Request, res: Response) => {
     // semantic-cache step; first-turn, non-search questions only).
     let referenceContext: string | null = null;
     if (queryEmbedding && effectiveMode !== "search") {
-      referenceContext = await safe(() => retrieveContext(queryEmbedding));
-      if (referenceContext) console.log("[RAG] grounded answer with NCERT-aligned context.");
+      referenceContext = await safe(() => retrieveContext(queryEmbedding, board));
+      if (referenceContext) console.log(`[RAG] grounded answer with curriculum context (board: ${board || "General"}).`);
     }
 
     const systemInstruction =
@@ -317,7 +320,7 @@ STUDENT CONTEXT (tailor the depth, examples, exam framing, and language to this)
 - Language Preference: ${language || "English"}
 - Preferred Analogy Type: ${preferredAnalogy || "Daily Life"}` +
       (referenceContext
-        ? `\n\nREFERENCE MATERIAL (NCERT-aligned notes — prefer these for facts and definitions; if they don't cover the question, use your own knowledge):\n${referenceContext}`
+        ? `\n\nREFERENCE MATERIAL (board-aligned curriculum notes — prefer these for facts and definitions; if they don't cover the question, use your own knowledge):\n${referenceContext}`
         : "") +
       (isQuant ? QUANT_ADDENDUM : "");
 
