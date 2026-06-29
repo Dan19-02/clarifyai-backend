@@ -23,7 +23,6 @@ import {
   knowledgeCount,
   knowledgeAll,
   rowToUser,
-  DEFAULT_CHAPTERS,
 } from "./db.js";
 
 function assert(cond: any, label: string) {
@@ -40,6 +39,12 @@ function assert(cond: any, label: string) {
   assert(true, "schema created");
 
   const passwordHash = await bcrypt.hash("secret123", 10);
+  // Seed a non-empty literal (DEFAULT_CHAPTERS is intentionally empty now) so the
+  // JSONB chapters round-trip is still genuinely exercised.
+  const seedChapters = [
+    { id: "sc1", name: "Test Chapter A", mastery: "weak", confidenceScore: 20, lastStudied: "2026-06-29" },
+    { id: "sc2", name: "Test Chapter B", mastery: "strong", confidenceScore: 90, lastStudied: "2026-06-29" },
+  ];
   const row = await createUser(q, {
     email: "Aarav@Example.com",
     passwordHash,
@@ -50,10 +55,13 @@ function assert(cond: any, label: string) {
     preferredAnalogy: "Cricket",
     examGoals: "Crack JEE Advanced",
     confidenceLevel: 3,
-    chapters: DEFAULT_CHAPTERS,
+    chapters: seedChapters,
   });
   assert(row.email === "aarav@example.com", "email is lowercased on insert");
-  assert(row.chapters.length === DEFAULT_CHAPTERS.length, "chapters seeded as JSONB");
+  assert(
+    row.chapters.length === 2 && row.chapters[0].name === "Test Chapter A" && row.chapters[1].confidenceScore === 90,
+    "chapters round-trip through the JSONB column"
+  );
 
   const byEmail = await getUserByEmail(q, "AARAV@example.com");
   assert(byEmail && (await bcrypt.compare("secret123", byEmail.password_hash)), "login: password verifies");

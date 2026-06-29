@@ -430,55 +430,6 @@ aiRouter.post("/tts", requireAuth, async (req: Request, res: Response) => {
   }
 });
 
-aiRouter.post("/generate-image", requireAuth, async (req: Request, res: Response) => {
-  try {
-    const { prompt, size } = req.body;
-    const uid = (req as any).userId as number;
-    if (!rateLimit(`${uid}:image`, 10)) return res.status(429).json({ error: "Image limit reached for now. Please wait a minute and try again." });
-    if (!apiKey) return res.status(500).json({ error: "GEMINI_API_KEY is missing." });
-
-    const buildPrompt = `Create a clean, elegant, clear educational diagram or high-quality illustration. It should be perfect for a student learning about: ${prompt}. Style: Crisp educational diagram, no clutter, visually pleasing colors, labels if necessary.`;
-
-    let response;
-    let modelName = "gemini-3.1-flash-image";
-    try {
-      response = await ai.models.generateContent({
-        model: modelName,
-        contents: { parts: [{ text: buildPrompt }] },
-        config: { imageConfig: { aspectRatio: "1:1", imageSize: size || "1K" } },
-      });
-    } catch (imageErr: any) {
-      console.warn(`[AI] image ${modelName} failed:`, imageErr.message);
-      modelName = "gemini-2.5-flash-image";
-      try {
-        response = await ai.models.generateContent({
-          model: modelName,
-          contents: { parts: [{ text: buildPrompt }] },
-          config: { imageConfig: { aspectRatio: "1:1" } },
-        });
-      } catch (fallbackErr: any) {
-        return res.status(429).json({
-          error: "Image generation quota exceeded or requires a paid API key. Please try again later.",
-          details: fallbackErr.message,
-        });
-      }
-    }
-
-    let imageUrl: string | null = null;
-    let fallbackText = "";
-    for (const part of response.candidates?.[0]?.content?.parts || []) {
-      if (part.inlineData) imageUrl = `data:image/png;base64,${part.inlineData.data}`;
-      else if (part.text) fallbackText += part.text;
-    }
-
-    if (imageUrl) res.json({ imageUrl });
-    else res.status(404).json({ error: "No image data found in response.", details: fallbackText });
-  } catch (error: any) {
-    console.error("Image generation API error:", error);
-    res.status(500).json({ error: error.message || "Image generation failed." });
-  }
-});
-
 /** Attach the live voice WebSocket (/api/live) to the HTTP server. */
 export function attachLiveWebSocket(server: http.Server) {
   const wss = new WebSocketServer({ noServer: true });

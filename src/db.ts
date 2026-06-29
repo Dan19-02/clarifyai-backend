@@ -56,12 +56,16 @@ export async function initDb(): Promise<void> {
   console.warn("[DB] ⚠ Using IN-MEMORY database — data resets on restart. Set a real DATABASE_URL to persist.");
 }
 
-export const DEFAULT_CHAPTERS = [
-  { id: "ch-1", name: "Photosynthesis & Light Reactions", mastery: "developing", confidenceScore: 65, lastStudied: "2026-06-26" },
-  { id: "ch-2", name: "Newton's Second Law of Motion", mastery: "weak", confidenceScore: 35, lastStudied: "2026-06-25" },
-  { id: "ch-3", name: "Quadratic Equations & Roots", mastery: "strong", confidenceScore: 90, lastStudied: "2026-06-24" },
-  { id: "ch-4", name: "Chemical Bonding & Valency", mastery: "developing", confidenceScore: 50, lastStudied: "2026-06-23" },
-];
+export interface ChapterSeed {
+  id: string;
+  name: string;
+  mastery: "weak" | "developing" | "strong";
+  confidenceScore: number;
+  lastStudied: string;
+}
+
+// New accounts start with an empty Chapter Mastery list (no demo/prefilled data).
+export const DEFAULT_CHAPTERS: ChapterSeed[] = [];
 
 export const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS users (
