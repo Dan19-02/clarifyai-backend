@@ -22,8 +22,25 @@ const PORT = Number(process.env.PORT) || 4000;
 const server = http.createServer(app);
 attachLiveWebSocket(server);
 
-await initDb();
-server.listen(PORT, () => console.log(`Clarify.AI backend running on http://localhost:${PORT}`));
+// await initDb();
+// server.listen(PORT, () => console.log(`Clarify.AI backend running on http://localhost:${PORT}`));
 
-// Seed the RAG knowledge base in the background (doesn't block startup).
-ingestKnowledge().catch((e) => console.warn("[RAG] ingest error:", e.message));
+// // Seed the RAG knowledge base in the background (doesn't block startup).
+// ingestKnowledge().catch((e) => console.warn("[RAG] ingest error:", e.message));
+
+async function start() {
+  await initDb();
+
+  server.listen(PORT, () => {
+    console.log(`Clarify.AI backend running on http://localhost:${PORT}`);
+  });
+
+  ingestKnowledge().catch((e) =>
+    console.warn("[RAG] ingest error:", e.message)
+  );
+}
+
+start().catch((err) => {
+  console.error("Startup failed:", err);
+  process.exit(1);
+});
