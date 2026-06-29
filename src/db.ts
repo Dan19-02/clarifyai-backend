@@ -80,16 +80,28 @@ CREATE TABLE IF NOT EXISTS users (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS conversations (
+  id TEXT PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  title TEXT NOT NULL DEFAULT 'New chat',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_conversations_user ON conversations(user_id, updated_at);
+
 CREATE TABLE IF NOT EXISTS messages (
   id TEXT PRIMARY KEY,
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  conversation_id TEXT,
   role TEXT NOT NULL,
   text TEXT NOT NULL,
   mode TEXT,
   sources JSONB NOT NULL DEFAULT '[]'::jsonb,
+  attachments JSONB NOT NULL DEFAULT '[]'::jsonb,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_messages_user ON messages(user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, created_at);
 
 CREATE TABLE IF NOT EXISTS explanation_cache (
   cache_key TEXT PRIMARY KEY,
@@ -118,6 +130,17 @@ CREATE TABLE IF NOT EXISTS knowledge_chunks (
 
 export async function initSchema(q: Queryable = pool): Promise<void> {
   await q.query(SCHEMA_SQL);
+  // Defensive migrations for databases created before conversations existed.
+  for (const sql of [
+    `ALTER TABLE messages ADD COLUMN IF NOT EXISTS conversation_id TEXT`,
+    `ALTER TABLE messages ADD COLUMN IF NOT EXISTS attachments JSONB NOT NULL DEFAULT '[]'::jsonb`,
+  ]) {
+    try {
+      await q.query(sql);
+    } catch {
+      /* column already exists / engine lacks IF NOT EXISTS — safe to ignore */
+    }
+  }
 }
 
 /** Shape returned to the client (camelCase profile + chapters). */
@@ -217,17 +240,19 @@ export async function updateUser(q: Queryable, id: number, p: ProfileUpdate) {
 
 export interface StoredMessage {
   id: string;
+  conversationId: string;
   role: string;
   text: string;
   mode?: string;
   sources?: { title: string; uri: string }[];
+  attachments?: any[];
 }
 
-export async function getMessages(q: Queryable, userId: number, limit = 200) {
+export async function getMessages(q: Queryable, userId: number, conversationId: string, limit = 200) {
   const { rows } = await q.query(
-    `SELECT id, role, text, mode, sources, created_at
-     FROM messages WHERE user_id = $1 ORDER BY created_at ASC LIMIT $2`,
-    [userId, limit]
+    `SELECT id, role, text, mode, sources, attachments, created_at
+     FROM messages WHERE user_id = $1 AND conversation_id = $2 ORDER BY created_at ASC LIMIT $3`,
+    [userId, conversationId, limit]
   );
   return rows.map((r) => ({
     id: r.id,
@@ -235,17 +260,77 @@ export async function getMessages(q: Queryable, userId: number, limit = 200) {
     text: r.text,
     mode: r.mode || undefined,
     sources: r.sources || [],
+    attachments: r.attachments || [],
     timestamp: new Date(r.created_at).toLocaleTimeString(),
   }));
 }
 
 export async function addMessage(q: Queryable, userId: number, m: StoredMessage) {
   await q.query(
-    `INSERT INTO messages (id, user_id, role, text, mode, sources)
-     VALUES ($1,$2,$3,$4,$5,$6)
+    `INSERT INTO messages (id, user_id, conversation_id, role, text, mode, sources, attachments)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
      ON CONFLICT (id) DO NOTHING`,
-    [m.id, userId, m.role, m.text, m.mode || null, JSON.stringify(m.sources || [])]
+    [m.id, userId, m.conversationId, m.role, m.text, m.mode || null, JSON.stringify(m.sources || []), JSON.stringify(m.attachments || [])]
   );
+  // Bump the conversation so the most recently used one floats to the top.
+  await q.query(`UPDATE conversations SET updated_at = now() WHERE id = $1 AND user_id = $2`, [m.conversationId, userId]);
+}
+
+// ---- Conversations (separate chat windows) ----
+export async function listConversations(q: Queryable, userId: number) {
+  const { rows } = await q.query(
+    `SELECT c.id, c.title, c.created_at, c.updated_at, count(m.id) AS message_count
+     FROM conversations c
+     LEFT JOIN messages m ON m.conversation_id = c.id
+     WHERE c.user_id = $1
+     GROUP BY c.id, c.title, c.created_at, c.updated_at
+     ORDER BY c.updated_at DESC`,
+    [userId]
+  );
+  return rows.map((r) => ({
+    id: r.id,
+    title: r.title,
+    messageCount: Number(r.message_count || 0),
+    updatedAt: new Date(r.updated_at).toISOString(),
+  }));
+}
+
+export async function createConversation(q: Queryable, userId: number, id: string, title = "New chat") {
+  const { rows } = await q.query(
+    `INSERT INTO conversations (id, user_id, title) VALUES ($1,$2,$3) RETURNING id, title, created_at, updated_at`,
+    [id, userId, title]
+  );
+  const r = rows[0];
+  return { id: r.id, title: r.title, messageCount: 0, updatedAt: new Date(r.updated_at).toISOString() };
+}
+
+export async function renameConversation(q: Queryable, userId: number, id: string, title: string) {
+  await q.query(`UPDATE conversations SET title = $3 WHERE id = $1 AND user_id = $2`, [id, userId, title]);
+}
+
+export async function deleteConversation(q: Queryable, userId: number, id: string) {
+  // Manual cascade (messages.conversation_id has no FK so it works on every engine).
+  await q.query(`DELETE FROM messages WHERE user_id = $1 AND conversation_id = $2`, [userId, id]);
+  await q.query(`DELETE FROM conversations WHERE id = $2 AND user_id = $1`, [userId, id]);
+}
+
+export async function conversationOwnedBy(q: Queryable, userId: number, id: string): Promise<boolean> {
+  const { rows } = await q.query(`SELECT 1 FROM conversations WHERE id = $1 AND user_id = $2`, [id, userId]);
+  return rows.length > 0;
+}
+
+/**
+ * Make sure the user has at least one conversation, migrating any legacy
+ * messages (saved before conversations existed) into a default one.
+ */
+export async function ensureDefaultConversation(q: Queryable, userId: number, newId: string): Promise<string> {
+  const existing = await listConversations(q, userId);
+  if (existing.length > 0) return existing[0].id;
+
+  await createConversation(q, userId, newId, "My Study Log");
+  // Adopt any orphaned messages from before this feature shipped.
+  await q.query(`UPDATE messages SET conversation_id = $1 WHERE user_id = $2 AND conversation_id IS NULL`, [newId, userId]);
+  return newId;
 }
 
 export interface CachedAnswer {

@@ -14,6 +14,9 @@ import {
   updateUser,
   addMessage,
   getMessages,
+  createConversation,
+  listConversations,
+  deleteConversation,
   cacheGetByKey,
   cacheUpsertFull,
   knowledgeInsert,
@@ -75,10 +78,20 @@ function assert(cond: any, label: string) {
   const profileShape = rowToUser(updated);
   assert(profileShape.profile.preferredAnalogy === "Trains", "rowToUser maps camelCase profile");
 
-  await addMessage(q, row.id, { id: "m1", role: "user", text: "Explain inertia", mode: "standard", sources: [] });
-  await addMessage(q, row.id, { id: "m1", role: "user", text: "dup", sources: [] }); // ON CONFLICT DO NOTHING
-  const msgs = await getMessages(q, row.id, 50);
-  assert(msgs.length === 1, "messages append + dedupe by id");
+  const conv = await createConversation(q, row.id, "conv-1", "Physics doubts");
+  assert(conv.id === "conv-1" && conv.title === "Physics doubts", "conversation create");
+
+  await addMessage(q, row.id, { id: "m1", conversationId: conv.id, role: "user", text: "Explain inertia", mode: "standard", sources: [] });
+  await addMessage(q, row.id, { id: "m1", conversationId: conv.id, role: "user", text: "dup", sources: [] }); // ON CONFLICT DO NOTHING
+  const msgs = await getMessages(q, row.id, conv.id, 50);
+  assert(msgs.length === 1, "messages append + dedupe by id (scoped to conversation)");
+
+  const convList = await listConversations(q, row.id);
+  assert(convList.length === 1 && convList[0].messageCount === 1, "conversation list reports message count");
+
+  await deleteConversation(q, row.id, conv.id);
+  assert((await listConversations(q, row.id)).length === 0, "conversation delete cascades messages");
+  assert((await getMessages(q, row.id, conv.id, 50)).length === 0, "messages gone after conversation delete");
 
   const facets = { mode: "standard", board: "JEE", grade: "12th", language: "English", preferredAnalogy: "Daily Life" };
   await cacheUpsertFull(q, { cacheKey: "k1", ...facets, question: "what is inertia", embedding: [0.1, 0.2, 0.3], text: "cached answer", sources: [{ title: "T", uri: "u" }] });

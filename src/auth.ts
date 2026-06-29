@@ -18,9 +18,20 @@ import {
   updateUser,
   getMessages,
   addMessage,
+  listConversations,
+  createConversation,
+  renameConversation,
+  deleteConversation,
+  conversationOwnedBy,
+  ensureDefaultConversation,
   rowToUser,
   DEFAULT_CHAPTERS,
 } from "./db.js";
+
+// Compact unique id for new conversations (no external deps needed).
+function newId(prefix = "conv"): string {
+  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
 
 const JWT_SECRET = process.env.JWT_SECRET || "dev-insecure-secret-change-me";
 const TOKEN_TTL = "30d";
@@ -157,19 +168,76 @@ authRouter.put("/me", requireAuth, async (req: Request, res: Response) => {
   }
 });
 
-// --- Chat history ---
-authRouter.get("/messages", requireAuth, async (req: Request, res: Response) => {
-  const messages = await getMessages(pool, (req as any).userId);
+// --- Conversations (separate chat windows) ---
+
+// List the student's conversations, creating a default one on first visit
+// (also adopts any legacy messages saved before conversations existed).
+authRouter.get("/conversations", requireAuth, async (req: Request, res: Response) => {
+  try {
+    const uid = (req as any).userId;
+    await ensureDefaultConversation(pool, uid, newId());
+    const conversations = await listConversations(pool, uid);
+    res.json({ conversations });
+  } catch (err) {
+    console.error("List conversations error:", err);
+    res.status(500).json({ error: "Could not load your conversations." });
+  }
+});
+
+authRouter.post("/conversations", requireAuth, async (req: Request, res: Response) => {
+  try {
+    const title = (req.body?.title || "New chat").toString().slice(0, 120);
+    const conversation = await createConversation(pool, (req as any).userId, newId(), title);
+    res.status(201).json({ conversation });
+  } catch (err) {
+    console.error("Create conversation error:", err);
+    res.status(500).json({ error: "Could not start a new chat." });
+  }
+});
+
+authRouter.patch("/conversations/:id", requireAuth, async (req: Request, res: Response) => {
+  try {
+    const title = (req.body?.title || "").toString().trim().slice(0, 120);
+    if (!title) return res.status(400).json({ error: "A title is required." });
+    await renameConversation(pool, (req as any).userId, String(req.params.id), title);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("Rename conversation error:", err);
+    res.status(500).json({ error: "Could not rename this chat." });
+  }
+});
+
+authRouter.delete("/conversations/:id", requireAuth, async (req: Request, res: Response) => {
+  try {
+    await deleteConversation(pool, (req as any).userId, String(req.params.id));
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("Delete conversation error:", err);
+    res.status(500).json({ error: "Could not delete this chat." });
+  }
+});
+
+// --- Chat history (scoped to one conversation) ---
+authRouter.get("/conversations/:id/messages", requireAuth, async (req: Request, res: Response) => {
+  const uid = (req as any).userId;
+  if (!(await conversationOwnedBy(pool, uid, String(req.params.id)))) {
+    return res.status(404).json({ error: "Conversation not found." });
+  }
+  const messages = await getMessages(pool, uid, String(req.params.id));
   res.json({ messages });
 });
 
-authRouter.post("/messages", requireAuth, async (req: Request, res: Response) => {
+authRouter.post("/conversations/:id/messages", requireAuth, async (req: Request, res: Response) => {
   try {
-    const { id, role, text, mode, sources } = req.body || {};
+    const uid = (req as any).userId;
+    const { id, role, text, mode, sources, attachments } = req.body || {};
     if (!id || !role || typeof text !== "string") {
       return res.status(400).json({ error: "Invalid message." });
     }
-    await addMessage(pool, (req as any).userId, { id, role, text, mode, sources });
+    if (!(await conversationOwnedBy(pool, uid, String(req.params.id)))) {
+      return res.status(404).json({ error: "Conversation not found." });
+    }
+    await addMessage(pool, uid, { id, conversationId: String(req.params.id), role, text, mode, sources, attachments });
     res.status(201).json({ ok: true });
   } catch (err) {
     console.error("Add message error:", err);

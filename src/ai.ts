@@ -229,6 +229,12 @@ aiRouter.post("/chat", requireAuth, async (req: Request, res: Response) => {
       return res.status(429).json({ error: "You're sending messages very fast. Take a breath and try again in a moment. 🌱" });
     }
 
+    // Uploaded images / files (multimodal). Each: { data: base64, mimeType }.
+    const images = Array.isArray(req.body?.images)
+      ? req.body.images.filter((im: any) => im && im.data && im.mimeType).slice(0, 6)
+      : [];
+    const hasImages = images.length > 0;
+
     // Auto-route when the student left it on the default "Standard" (most do).
     const requestedMode = mode || "standard";
     const effectiveMode = requestedMode === "standard" ? classifyQuery(message) : requestedMode;
@@ -237,7 +243,9 @@ aiRouter.post("/chat", requireAuth, async (req: Request, res: Response) => {
     if (requestedMode !== effectiveMode) console.log(`[AI] auto-routed: ${requestedMode} → ${effectiveMode}`);
 
     const cacheable =
-      (effectiveMode === "standard" || effectiveMode === "thinking") && (!Array.isArray(history) || history.length === 0);
+      !hasImages &&
+      (effectiveMode === "standard" || effectiveMode === "thinking") &&
+      (!Array.isArray(history) || history.length === 0);
     const facets: CacheFacets = { mode: effectiveMode, board, grade, language, preferredAnalogy };
     const cacheKey = cacheable ? makeCacheKey({ ...facets, message }) : "";
     const deepVerify = req.body?.deepVerify === true;
@@ -339,10 +347,13 @@ STUDENT CONTEXT (tailor the depth, examples, exam framing, and language to this)
     if (Array.isArray(history)) {
       for (const h of history) contents.push({ role: h.role === "user" ? "user" : "model", parts: [{ text: h.text }] });
     }
-    contents.push({ role: "user", parts: [{ text: message }] });
+    const userParts: any[] = [{ text: message || "Please look at the attached image and help me understand it." }];
+    for (const im of images) userParts.push({ inlineData: { mimeType: im.mimeType, data: im.data } });
+    contents.push({ role: "user", parts: userParts });
 
     // Thinking mode → open-source reasoning model (skips expensive Gemini Pro).
-    if (effectiveMode === "thinking" && openSourceEnabled) {
+    // Skipped when files are attached — only Gemini can see images.
+    if (effectiveMode === "thinking" && openSourceEnabled && !hasImages) {
       try {
         const text = await callOpenSource(config.systemInstruction, toOpenAIMessages(history, message), temperature);
         return finish(text, []);
@@ -374,7 +385,7 @@ STUDENT CONTEXT (tailor the depth, examples, exam framing, and language to this)
       groundingChunks?.map((c: any) => ({ title: c.web?.title || "Search Source", uri: c.web?.uri || "#" })) || [];
 
     // Search mode → Gemini grounded above; open-source model writes the answer.
-    if (effectiveMode === "search" && openSourceEnabled) {
+    if (effectiveMode === "search" && openSourceEnabled && !hasImages) {
       try {
         const augmented =
           `Here is up-to-date information gathered from a Google Search to help you answer accurately:\n\n"""\n${responseText}\n"""\n\n` +
