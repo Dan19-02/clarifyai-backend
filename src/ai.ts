@@ -306,7 +306,11 @@ aiRouter.post("/chat", requireAuth, async (req: Request, res: Response) => {
       res.json({ text: finalText, sources: sources || [] });
     };
 
-    const needsGemini = !(effectiveMode === "thinking" && openSourceEnabled);
+    // MiniMax is the brain for Standard + Thinking (text), so Gemini isn't
+    // required for those — it's only needed for Search grounding, image vision,
+    // and as a fallback when MiniMax is unavailable.
+    const usesOpenSourceBrain = (effectiveMode === "standard" || effectiveMode === "thinking") && openSourceEnabled && !hasImages;
+    const needsGemini = !usesOpenSourceBrain;
     if (!apiKey && needsGemini) {
       return res.status(500).json({ error: "GEMINI_API_KEY is missing on the server." });
     }
@@ -351,14 +355,17 @@ STUDENT CONTEXT (tailor the depth, examples, exam framing, and language to this)
     for (const im of images) userParts.push({ inlineData: { mimeType: im.mimeType, data: im.data } });
     contents.push({ role: "user", parts: userParts });
 
-    // Thinking mode → open-source reasoning model (skips expensive Gemini Pro).
-    // Skipped when files are attached — only Gemini can see images.
-    if (effectiveMode === "thinking" && openSourceEnabled && !hasImages) {
+    // Standard + Thinking → MiniMax (the open-source "brain") as the primary
+    // model. Gemini is used ONLY as a tool: Google Search grounding (search mode),
+    // image vision (uploads), TTS, and live voice. Skipped here when files are
+    // attached, since MiniMax can't see images — those fall through to Gemini.
+    // If MiniMax is unavailable, we fall back to Gemini below.
+    if ((effectiveMode === "standard" || effectiveMode === "thinking") && openSourceEnabled && !hasImages) {
       try {
         const text = await callOpenSource(config.systemInstruction, toOpenAIMessages(history, message), temperature);
         return finish(text, []);
       } catch (osErr: any) {
-        console.warn("[AI] thinking open-source failed, falling back to Gemini:", osErr.message);
+        console.warn(`[AI] ${effectiveMode} open-source failed, falling back to Gemini:`, osErr.message);
       }
     }
 
