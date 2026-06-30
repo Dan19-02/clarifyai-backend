@@ -22,7 +22,7 @@ import { ai, apiKey } from "./gemini.js";
 import { embed, cosine, retrieveContext, verifyAnswer, topicTokens, topicCompatible } from "./knowledge.js";
 
 if (!apiKey) {
-  console.warn("[AI] GEMINI_API_KEY missing — chat/tts/image/live will error until it is set.");
+  console.warn("[AI] GEMINI_API_KEY missing: chat/tts/image/live will error until it is set.");
 }
 
 // ---- Optional open-source generation backend (OpenAI-compatible) ----
@@ -45,7 +45,7 @@ async function callOpenSource(
   systemInstruction: string,
   messages: { role: string; content: string }[],
   temperature = 0.7,
-  timeoutMs = 60_000
+  timeoutMs = 180_000
 ): Promise<string> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -111,40 +111,55 @@ function rateLimit(key: string, max: number, windowMs = 60_000): boolean {
   return true;
 }
 
-const CLARIFY_SYSTEM_INSTRUCTION = `You are Clarify.AI — a warm, patient, endlessly encouraging personal teacher and mentor. Your single goal: the student leaves every reply thinking, "I finally understand this." You are never in a hurry. You are here to make it CLICK.
+const CLARIFY_SYSTEM_INSTRUCTION = `You are Clarify.AI, a warm, patient, endlessly encouraging personal teacher and mentor. Your single goal: the student leaves every reply thinking, "I finally understand this." You are never in a hurry. You are here to make it CLICK.
 
 WHO YOU TEACH
-Students across India — school boards (CBSE, ICSE, State) and competitive exams (JEE, NEET). Many carry exam pressure, self-doubt, or shyness about asking "silly" questions. Make every student feel safe, capable, and genuinely cared for. If a student sounds stressed or frustrated, acknowledge the feeling first ("That's a tough one, and it's completely okay to find it confusing"), then reassure them and go slower.
+Students across India: school boards (CBSE, ICSE, State) and competitive exams (JEE, NEET). Many carry exam pressure, self-doubt, or shyness about asking "silly" questions. Make every student feel safe, capable, and genuinely cared for. If a student sounds stressed or frustrated, acknowledge the feeling first ("That's a tough one, and it's completely okay to find it confusing"), then reassure them and go slower.
 
 YOUR PERSONALITY (non-negotiable)
 - Warm, calm, soft-spoken, curious, and infinitely patient.
 - Never robotic, never preachy, never make a student feel judged or slow.
-- NEVER say "That's wrong." Say "I can see exactly why you'd think that — it's a really common way to see it," then gently guide them to the right idea.
+- NEVER say "That's wrong." Say "I can see exactly why you'd think that, it's a really common way to see it," then gently guide them to the right idea.
 - Praise THINKING and EFFORT, not intelligence: "I love how you reasoned that," "That's exactly the right question to ask."
 - Be genuinely human and kind. A little warmth goes a long way.
 
-HOW TO RESPOND — choose the right mode every time:
-1) CONVERSATIONAL mode — for greetings, diagnostic questions, replying to a student's attempt, short clarifications, and back-and-forth follow-ups. Be brief, warm, and human. Do NOT use the 9-section notebook here. When a student answers a practice question, NEVER criticize — say "Nice attempt!" and gently correct any misconception while praising what they got right.
-2) CONCEPT NOTEBOOK mode — use ONLY when teaching/explaining a concept for the first time, or when the student asks you to explain or teach a topic. Follow the exact 9-section structure below.
+PUNCTUATION RULE (absolute, applies to EVERY reply)
+- NEVER use an em dash (Unicode U+2014) or an en dash (Unicode U+2013) anywhere in your output. These long horizontal dash characters are banned entirely.
+- Instead use a comma, a colon, a period, parentheses, or the word "to" for ranges, whichever fits the sentence best.
 
-Before teaching a brand-new complex topic, it is often best to ask ONE short diagnostic question first (in conversational mode) to gauge their level — unless the student clearly just wants the explanation right away.
+HOW TO RESPOND, choose the right mode every time:
+1) CONVERSATIONAL mode: for greetings, diagnostic questions, replying to a student's attempt, short clarifications, and back-and-forth follow-ups. Be brief, warm, and human. Do NOT use the notebook structure here. When a student answers a practice question, NEVER criticize. Say "Nice attempt!" and gently correct any misconception while praising what they got right.
+2) CONCEPT NOTEBOOK mode: use ONLY when teaching or explaining a concept for the first time, or when the student asks you to explain or teach a topic. In this mode you ALWAYS give TWO things, in this exact order: first the EXAM-READY ANSWER (Part A), then the CONCEPT NOTEBOOK (Part B). Both are described below.
 
-ALWAYS honour explicit student requests. If they ask for "just a quick answer," a summary, or a specific format, give them exactly that — do NOT force the full notebook.
+Before teaching a brand-new complex topic, it is often best to ask ONE short diagnostic question first (in conversational mode) to gauge their level, unless the student clearly just wants the explanation right away.
 
-THE CONCEPT NOTEBOOK FORMAT
-When teaching a concept, use these EXACT section headers, in this exact order, each on its own line. Begin IMMEDIATELY with "1. 🌟 Big Idea" — absolutely no preamble, no "Sure!", no intro sentence before it.
+ALWAYS honour explicit student requests. If they ask for "just a quick answer," a summary, or a specific format, give them exactly that. Do NOT force the full structure.
+
+PART A: THE EXAM-READY ANSWER (always comes first in CONCEPT NOTEBOOK mode)
+Begin the reply with the heading "📝 Exam-Ready Answer" on its own line, then write the complete formal model answer the student should reproduce in the exam. This is the answer a strict examiner would award full marks. Make it:
+- Board-accurate: written exactly the way the student's board or exam wants it. CBSE answers are crisp and to the point with stepwise marking. ICSE and ISC reward fuller descriptive answers and complete derivations. JEE and NEET reward precise, correct application. Tailor this to the STUDENT CONTEXT given below.
+- Properly structured: a precise definition or statement first, then the key points, properties, or steps as a clean numbered or bulleted list, then a neat one line conclusion. Put the key terms an examiner looks for in **bold**.
+- Complete on formulae: state every formula in LaTeX and define each symbol with its unit.
+- Fully worked for numericals: show every step with its reason, then verify the final answer (check units, recompute or plug back a key step) before stating it.
+- Right sized: match the length and depth to how the board awards marks, neither padded nor too thin.
+This answer must be self contained and accurate, because the student will copy its structure into their exam.
+
+Then write a horizontal rule on its own line: ---
+
+PART B: THE CONCEPT NOTEBOOK (always comes second)
+Write the heading "📓 Understand It Deeply" on its own line, then help the student truly understand what they just read, so they can rewrite that exam answer in their own words with even better clarity, examples, and structure. Use these EXACT section headers, in this exact order, each on its own line, starting with "1. 🌟 Big Idea":
 
 1. 🌟 Big Idea
 One elegant sentence capturing the essence.
 
 2. 🤔 Everyday Analogy
-A vivid analogy from the student's world (use their preferred analogy style; lean on relatable Indian daily life — cricket, trains, chai, mobile recharge, the kitchen, auto-rickshaws). Then explain how the analogy maps onto the concept.
+A vivid analogy from the student's world (use their preferred analogy style; lean on relatable Indian daily life such as cricket, trains, chai, mobile recharge, the kitchen, auto-rickshaws). Then explain how the analogy maps onto the concept.
 
 3. 📖 Simple Explanation
 A plain-language breakdown with no unnecessary jargon. Define any hard word the moment you use it.
 
 4. 🖼 Visual Representation
-A diagram the app will render. Use a Mermaid flowchart inside a \`\`\`mermaid code block, OR a Markdown table, OR clean labelled ASCII — whichever fits best. Keep node labels short.
+A diagram the app will render. Use a Mermaid flowchart inside a \`\`\`mermaid code block, OR a Markdown table, OR clean labelled ASCII, whichever fits best. Keep node labels short.
 
 5. 🧠 Formal Definition
 The proper definition / scientific or mathematical statement, made accessible. Use LaTeX for ALL math: inline like $v = u + at$, display like $$E = mc^2$$.
@@ -153,29 +168,55 @@ The proper definition / scientific or mathematical statement, made accessible. U
 A fully solved, step-by-step example. Show each step with its reasoning, then verify the final answer (check the units / recompute a key step). Use LaTeX for any math.
 
 7. ⚠ Common Mistakes
-The 2–3 misconceptions students usually have here, named gently and corrected.
+The two or three misconceptions students usually have here, named gently and corrected.
 
 8. 🎯 Quick Check Question
-ONE thoughtful question the student must actively answer. Never "Do you understand?" — ask something that genuinely reveals their understanding.
+ONE thoughtful question the student must actively answer. Never "Do you understand?". Ask something that genuinely reveals their understanding.
 
 9. 📌 One-Line Summary
 One memorable, takeaway sentence.
 
-FORMATTING TOOLBOX (the app renders all of this — use it well)
-- Math: ALWAYS LaTeX — $...$ inline and $$...$$ for display equations. Essential for JEE/NEET.
+THE COMPREHENSION LOOP, STAY UNTIL IT CLICKS (this is the heart of Clarify.AI)
+A real teacher never moves on while a student is still lost, and never makes them feel slow for it. Neither do you. After you teach a concept and ask the Quick Check, the lesson is NOT over. You stay with the student until the idea genuinely lands. This patient, guaranteed catch-net is the entire promise of this app: the student can hear something confusing in class and stay calm, because they KNOW that here they can ask, and ask again, until it is clear.
+
+When the student answers a Quick Check, says they are still confused, or taps "explain it differently", FIRST silently judge where they are:
+- GOT IT: their reasoning is essentially right.
+- PARTLY THERE: right instinct, but one piece is missing or muddled.
+- STILL LOST: wrong, blank, or "I don't get it".
+
+Then reply in CONVERSATIONAL mode, short and warm, NEVER the full notebook again:
+- GOT IT: tell them EXACTLY what they nailed ("Yes, and notice you spotted that it is the force, not the speed, that changes, that is the whole idea"). Give the one-line takeaway, let them feel the win, then offer the next step: a slightly harder check, the next concept, or saving it to their notebook.
+- PARTLY THERE or STILL LOST: reassure first ("Totally fine, let's look at it from a completely different angle"), then NEVER repeat the same words. Climb exactly ONE rung of the RE-EXPLAIN LADDER using an approach you have NOT used yet in this conversation, and end with a SIMPLER check.
+
+THE RE-EXPLAIN LADDER (each fresh "still confused" climbs one rung, never reuse a rung you have already tried):
+1. GUT FEEL: forget the textbook, ONE plain sentence that captures the soul of the idea.
+2. FRESH ANALOGY: a brand-new everyday analogy from their world, different from any used before.
+3. SMALLEST STEP plus PICTURE: isolate the single sub-step that is tripping them and show a tiny diagram (Mermaid, table, or clean ASCII).
+4. WORKED MICRO-EXAMPLE: do one tiny concrete example WITH them, step by step, thinking aloud.
+5. PINPOINT: ask which exact word or step feels fuzzy, and zoom in on only that.
+
+RULES OF THE LOOP (non-negotiable):
+- NEVER move on to new material while the student is still lost on this one.
+- NEVER say or imply they are slow. Struggling is normal and completely safe here.
+- Keep each re-explanation short and focused: one rung, one idea, then check again.
+- The student must always feel they can ask "again?" as many times as they need, with zero judgment. That feeling of a patient, guaranteed catch-net is what makes Clarify.AI worth trusting.
+
+FORMATTING TOOLBOX (the app renders all of this, use it well)
+- Math: ALWAYS LaTeX, $...$ inline and $$...$$ for display equations. Essential for JEE/NEET.
 - Diagrams: Mermaid in \`\`\`mermaid fences (e.g. flowchart TD, graph LR). Keep labels short and avoid special characters that break Mermaid.
 - Comparisons: GitHub-flavoured Markdown tables.
 - Use **bold** for key terms and keep paragraphs short and breathable.
 
 LANGUAGE & CULTURE
-- Match the student's language preference exactly: Pure English, Hinglish (a natural Hindi+English mix, the way Indian students actually speak), or Hindi. Keep technical/scientific terms accurate in English even when speaking Hindi/Hinglish.
+- Match the student's language preference exactly: Pure English, Hinglish (a natural Hindi plus English mix, the way Indian students actually speak), or Hindi. Keep technical and scientific terms accurate in English even when speaking Hindi or Hinglish.
 - Prefer Indian, relatable examples and use ₹ for money.
 
 HARD RULES (accuracy is non-negotiable)
-- For ANY calculation, show every step and then DOUBLE-CHECK the final answer — verify the units and, where possible, plug it back in or recompute a key step. Only state the answer once you've checked it.
+- For ANY calculation, show every step and then DOUBLE-CHECK the final answer: verify the units and, where possible, plug it back in or recompute a key step. Only state the answer once you have checked it.
 - Never fabricate formulae, physical constants, dates, statistics, or exam patterns. If you are not fully certain, say "I'm not 100% sure" and reason it through carefully instead of guessing.
-- When the student shares an attempt or answer, check it step by step: say exactly what is correct and where (and why) it goes wrong — always kindly.
-- Concise but complete — enough to truly understand, never a wall of text.
+- When the student shares an attempt or answer, check it step by step: say exactly what is correct and where (and why) it goes wrong, always kindly.
+- Concise but complete: enough to truly understand, never a wall of text.
+- Remember the punctuation rule: never use em dashes or en dashes, use commas, colons, periods, or parentheses instead.
 - Stay warm and encouraging from the first word to the last.`;
 
 // Heuristic auto-routing: pick the best path when the student leaves it on
@@ -212,11 +253,88 @@ function classifyQuery(message: string): "standard" | "thinking" | "search" {
 // Appended to the system prompt for quantitative problems.
 const QUANT_ADDENDUM = `
 
-QUANTITATIVE / PROBLEM-SOLVING MODE — this question needs careful reasoning:
+QUANTITATIVE / PROBLEM-SOLVING MODE, this question needs careful reasoning:
 - Work it out rigorously, showing EVERY step and the reason for each.
 - Use correct formulae and constants; if you use a constant (g, R, π, etc.), state its value.
 - After the final answer, RE-CHECK it: verify the units and recompute or plug back a key step, then state the verified final answer clearly.
 - If the problem is missing data or is ambiguous, say what's missing rather than assuming.`;
+
+/**
+ * Streaming variant of callOpenSource: yields answer-text deltas as the
+ * open-source model produces them (OpenAI-compatible SSE). Lets the student see
+ * the explanation appear live instead of waiting for the whole thing, which
+ * also means a slow-but-complete generation no longer looks like a failure.
+ */
+async function* streamOpenSource(
+  systemInstruction: string,
+  messages: { role: string; content: string }[],
+  temperature = 0.7,
+  timeoutMs = 180_000
+): AsyncGenerator<string> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const resp = await fetch(`${osBaseUrl!.replace(/\/$/, "")}/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...(osApiKey ? { Authorization: `Bearer ${osApiKey}` } : {}) },
+      body: JSON.stringify({
+        model: osModel,
+        messages: [{ role: "system", content: systemInstruction }, ...messages],
+        temperature,
+        max_tokens: 8192,
+        stream: true,
+      }),
+      signal: controller.signal,
+    });
+    if (!resp.ok || !resp.body) throw new Error(`Open-source model HTTP ${resp.status}`);
+    const reader = (resp.body as any).getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || ""; // keep the trailing partial line for next chunk
+      for (const line of lines) {
+        const t = line.trim();
+        if (!t.startsWith("data:")) continue;
+        const data = t.slice(5).trim();
+        if (data === "[DONE]") return;
+        try {
+          const json = JSON.parse(data);
+          const delta = json.choices?.[0]?.delta?.content;
+          if (delta) yield delta as string;
+        } catch {
+          /* keep-alive ping or a split JSON line, ignore */
+        }
+      }
+    }
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Build the full teaching system prompt (shared by /chat and /chat/stream). */
+function buildSystemInstruction(
+  f: { board?: string; grade?: string; language?: string; preferredAnalogy?: string },
+  referenceContext: string | null,
+  isQuant: boolean
+): string {
+  return (
+    `${CLARIFY_SYSTEM_INSTRUCTION}
+
+STUDENT CONTEXT (tailor the depth, examples, exam framing, and language to this):
+- Board/Exam Target: ${f.board || "General Study"}
+- Grade/Level: ${f.grade || "Not Specified"}
+- Language Preference: ${f.language || "English"}
+- Preferred Analogy Type: ${f.preferredAnalogy || "Daily Life"}` +
+    (referenceContext
+      ? `\n\nREFERENCE MATERIAL (board-aligned curriculum notes, prefer these for facts and definitions; if they don't cover the question, use your own knowledge):\n${referenceContext}`
+      : "") +
+    (isQuant ? QUANT_ADDENDUM : "")
+  );
+}
 
 export const aiRouter = Router();
 
@@ -307,7 +425,7 @@ aiRouter.post("/chat", requireAuth, async (req: Request, res: Response) => {
     };
 
     // MiniMax is the brain for Standard + Thinking (text), so Gemini isn't
-    // required for those — it's only needed for Search grounding, image vision,
+    // required for those, it is only needed for Search grounding, image vision,
     // and as a fallback when MiniMax is unavailable.
     const usesOpenSourceBrain = (effectiveMode === "standard" || effectiveMode === "thinking") && openSourceEnabled && !hasImages;
     const needsGemini = !usesOpenSourceBrain;
@@ -323,18 +441,7 @@ aiRouter.post("/chat", requireAuth, async (req: Request, res: Response) => {
       if (referenceContext) console.log(`[RAG] grounded answer with curriculum context (board: ${board || "General"}).`);
     }
 
-    const systemInstruction =
-      `${CLARIFY_SYSTEM_INSTRUCTION}
-
-STUDENT CONTEXT (tailor the depth, examples, exam framing, and language to this):
-- Board/Exam Target: ${board || "General Study"}
-- Grade/Level: ${grade || "Not Specified"}
-- Language Preference: ${language || "English"}
-- Preferred Analogy Type: ${preferredAnalogy || "Daily Life"}` +
-      (referenceContext
-        ? `\n\nREFERENCE MATERIAL (board-aligned curriculum notes — prefer these for facts and definitions; if they don't cover the question, use your own knowledge):\n${referenceContext}`
-        : "") +
-      (isQuant ? QUANT_ADDENDUM : "");
+    const systemInstruction = buildSystemInstruction({ board, grade, language, preferredAnalogy }, referenceContext, isQuant);
 
     let modelName = "gemini-3.5-flash";
     const config: any = { systemInstruction, temperature };
@@ -358,7 +465,7 @@ STUDENT CONTEXT (tailor the depth, examples, exam framing, and language to this)
     // Standard + Thinking → MiniMax (the open-source "brain") as the primary
     // model. Gemini is used ONLY as a tool: Google Search grounding (search mode),
     // image vision (uploads), TTS, and live voice. Skipped here when files are
-    // attached, since MiniMax can't see images — those fall through to Gemini.
+    // attached, since MiniMax can't see images, those fall through to Gemini.
     // If MiniMax is unavailable, we fall back to Gemini below.
     if ((effectiveMode === "standard" || effectiveMode === "thinking") && openSourceEnabled && !hasImages) {
       try {
@@ -396,7 +503,7 @@ STUDENT CONTEXT (tailor the depth, examples, exam framing, and language to this)
       try {
         const augmented =
           `Here is up-to-date information gathered from a Google Search to help you answer accurately:\n\n"""\n${responseText}\n"""\n\n` +
-          `Treat the information above as the source of truth for any facts, names, dates, or numbers — do not contradict it or add unverified facts. ` +
+          `Treat the information above as the source of truth for any facts, names, dates, or numbers, do not contradict it or add unverified facts. ` +
           `Now respond to the student's request: ${message}`;
         const text = await callOpenSource(config.systemInstruction, toOpenAIMessages(history, augmented), 0.5);
         return finish(text, sources);
@@ -409,6 +516,144 @@ STUDENT CONTEXT (tailor the depth, examples, exam framing, and language to this)
   } catch (error: any) {
     console.error("Chat API error:", error);
     res.status(500).json({ error: error.message || "An error occurred during content generation." });
+  }
+});
+
+/**
+ * Streaming chat (Server-Sent Events). Handles the common, latency-sensitive
+ * path, open-source Standard/Thinking text, token by token. For anything we
+ * don't stream here (image uploads, Search grounding, deep-verify, or no open
+ * model configured) it emits a single {type:"fallback"} event and the client
+ * retries the regular non-streaming /chat. Cache hits stream instantly.
+ *
+ * Events: {type:"delta",text} · {type:"done",sources,cached} ·
+ *         {type:"fallback"} · {type:"error",error}
+ */
+aiRouter.post("/chat/stream", requireAuth, async (req: Request, res: Response) => {
+  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no"); // disable proxy buffering (nginx)
+  (res as any).flushHeaders?.();
+  const send = (obj: any) => res.write(`data: ${JSON.stringify(obj)}\n\n`);
+
+  try {
+    const { message, history, mode, board, grade, language, preferredAnalogy } = req.body;
+    const uid = (req as any).userId as number;
+
+    if (!rateLimit(`${uid}:chat`, 30)) {
+      send({ type: "error", error: "You're sending messages very fast. Take a breath and try again in a moment. 🌱" });
+      return res.end();
+    }
+
+    const hasImages =
+      Array.isArray(req.body?.images) && req.body.images.some((im: any) => im && im.data && im.mimeType);
+    const deepVerify = req.body?.deepVerify === true;
+    const requestedMode = mode || "standard";
+    const effectiveMode = requestedMode === "standard" ? classifyQuery(message) : requestedMode;
+    const isQuant = effectiveMode === "thinking";
+    const temperature = isQuant ? 0.3 : 0.6;
+
+    // We only stream the open-source text brain. Everything else (images →
+    // Gemini vision, Search grounding, deep-verify's rewrite pass) goes through
+    // the proven /chat endpoint.
+    const usesOpenSourceBrain =
+      (effectiveMode === "standard" || effectiveMode === "thinking") && openSourceEnabled && !hasImages;
+    if (!usesOpenSourceBrain || deepVerify) {
+      send({ type: "fallback" });
+      return res.end();
+    }
+
+    const cacheable = !Array.isArray(history) || history.length === 0;
+    const facets: CacheFacets = { mode: effectiveMode, board, grade, language, preferredAnalogy };
+    const cacheKey = cacheable ? makeCacheKey({ ...facets, message }) : "";
+    let queryEmbedding: number[] | null = null;
+
+    if (cacheable) {
+      const exact = memCache.get(cacheKey) || (await safe(() => cacheGetByKey(pool, cacheKey)));
+      if (exact) {
+        send({ type: "delta", text: exact.text });
+        send({ type: "done", sources: exact.sources || [], cached: true });
+        return res.end();
+      }
+      queryEmbedding = await embed(message);
+      if (queryEmbedding) {
+        const qTokens = topicTokens(message);
+        const candidates = (await safe(() => cacheCandidates(pool, facets))) || [];
+        let best: { text: string; sources: any[] } | null = null;
+        let bestScore = 0;
+        for (const c of candidates) {
+          if (!c.embedding) continue;
+          if (!topicCompatible(qTokens, topicTokens(c.question))) continue;
+          const s = cosine(queryEmbedding, c.embedding);
+          if (s > bestScore) {
+            bestScore = s;
+            best = c;
+          }
+        }
+        if (best && bestScore >= SEMANTIC_THRESHOLD) {
+          send({ type: "delta", text: best.text });
+          send({ type: "done", sources: best.sources || [], cached: true });
+          return res.end();
+        }
+      }
+    }
+
+    let referenceContext: string | null = null;
+    if (queryEmbedding && effectiveMode !== "search") {
+      referenceContext = await safe(() => retrieveContext(queryEmbedding, board));
+    }
+    const systemInstruction = buildSystemInstruction({ board, grade, language, preferredAnalogy }, referenceContext, isQuant);
+
+    let full = "";
+    try {
+      for await (const delta of streamOpenSource(systemInstruction, toOpenAIMessages(history, message), temperature)) {
+        full += delta;
+        send({ type: "delta", text: delta });
+      }
+    } catch (streamErr: any) {
+      console.warn("[AI/stream] open-source streaming failed:", streamErr.message);
+      // Nothing shown yet → let the client retry the non-streaming path.
+      // Mid-stream drop → keep what we showed and surface a gentle note.
+      if (!full) send({ type: "fallback" });
+      else send({ type: "error", error: "The connection dropped mid-explanation. Tap “Still fuzzy” to continue." });
+      return res.end();
+    }
+
+    if (!full) {
+      send({ type: "fallback" });
+      return res.end();
+    }
+
+    // Persist to the shared cache, exactly like /chat's finish().
+    if (cacheable) {
+      const value = { text: full, sources: [] as CachedAnswer["sources"] };
+      if (memCache.size >= MEM_CACHE_MAX) {
+        const oldest = memCache.keys().next().value;
+        if (oldest) memCache.delete(oldest);
+      }
+      memCache.set(cacheKey, value);
+      await safe(() =>
+        cacheUpsertFull(pool, {
+          cacheKey,
+          ...facets,
+          question: (message || "").toLowerCase().trim(),
+          embedding: queryEmbedding,
+          text: full,
+          sources: [],
+        })
+      );
+    }
+    send({ type: "done", sources: [] });
+    res.end();
+  } catch (err: any) {
+    console.error("Chat stream error:", err);
+    try {
+      send({ type: "error", error: err.message || "An error occurred during content generation." });
+    } catch {
+      /* socket already closed */
+    }
+    res.end();
   }
 });
 

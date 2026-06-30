@@ -37,7 +37,7 @@ const JWT_SECRET = process.env.JWT_SECRET || "dev-insecure-secret-change-me";
 const TOKEN_TTL = "30d";
 
 if (!process.env.JWT_SECRET) {
-  console.warn("[Auth] JWT_SECRET not set — using an insecure dev secret. Set JWT_SECRET before deploying.");
+  console.warn("[Auth] JWT_SECRET not set, using an insecure dev secret. Set JWT_SECRET before deploying.");
 }
 
 export function signToken(userId: number, email: string): string {

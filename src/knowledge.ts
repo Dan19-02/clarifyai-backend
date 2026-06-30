@@ -68,9 +68,9 @@ export function topicTokens(message: string): Set<string> {
  * Whether two questions are about the SAME thing for cache-reuse purposes.
  * Rule: one question's content tokens must be a subset of the other's. This
  * allows paraphrases that only add filler ("process of photosynthesis" ⊇
- * "photosynthesis") but blocks pairs that differ by a meaningful token —
- * "newton FIRST law" vs "newton SECOND law", "KINETIC energy" vs "POTENTIAL
- * energy" — which would otherwise be wrongly reused.
+ * "photosynthesis") but blocks pairs that differ by a meaningful token
+ * ("newton FIRST law" vs "newton SECOND law", "KINETIC energy" vs "POTENTIAL
+ * energy"), which would otherwise be wrongly reused.
  */
 export function topicCompatible(a: Set<string>, b: Set<string>): boolean {
   if (a.size === 0 || b.size === 0) return a.size === b.size;
@@ -123,7 +123,7 @@ export async function ingestKnowledge(): Promise<void> {
       return;
     }
     if (!apiKey) {
-      console.warn("[RAG] No GEMINI_API_KEY — skipping knowledge ingestion (RAG disabled).");
+      console.warn("[RAG] No GEMINI_API_KEY: skipping knowledge ingestion (RAG disabled).");
       return;
     }
     let ok = 0;
@@ -169,7 +169,7 @@ export async function retrieveContext(
     .slice(0, k);
   if (!scored.length) return null;
   return scored
-    .map((x) => `• [${x.r.subject} — ${x.r.topic}${x.r.board && x.r.board !== "General" ? " · " + x.r.board : ""}] ${x.r.content}`)
+    .map((x) => `• [${x.r.subject}: ${x.r.topic}${x.r.board && x.r.board !== "General" ? " · " + x.r.board : ""}] ${x.r.content}`)
     .join("\n\n");
 }
 

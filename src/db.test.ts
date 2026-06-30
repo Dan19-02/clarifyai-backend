@@ -1,5 +1,5 @@
 /**
- * DB-layer smoke test using an in-memory Postgres (pg-mem) — no real database
+ * DB-layer smoke test using an in-memory Postgres (pg-mem). No real database
  * needed. Validates the schema + the exact queries used by signup/login/profile/
  * messages/cache, plus the bcrypt + JWT flow. Run with: npm run test:db
  */

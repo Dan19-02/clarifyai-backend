@@ -15,7 +15,7 @@ export interface Queryable {
 }
 
 /**
- * The active database pool. Set by initDb() at startup — either a real
+ * The active database pool. Set by initDb() at startup. It is either a real
  * PostgreSQL pool, or an in-memory pg-mem pool as a zero-setup dev fallback.
  * Exported as a live binding so route modules always see the current pool.
  */
@@ -53,7 +53,7 @@ export async function initDb(): Promise<void> {
   const PgMemPool = newDb().adapters.createPg().Pool;
   pool = new PgMemPool();
   await initSchema(pool);
-  console.warn("[DB] ⚠ Using IN-MEMORY database — data resets on restart. Set a real DATABASE_URL to persist.");
+  console.warn("[DB] ⚠ Using IN-MEMORY database: data resets on restart. Set a real DATABASE_URL to persist.");
 }
 
 export interface ChapterSeed {
@@ -142,7 +142,7 @@ export async function initSchema(q: Queryable = pool): Promise<void> {
     try {
       await q.query(sql);
     } catch {
-      /* column already exists / engine lacks IF NOT EXISTS — safe to ignore */
+      /* column already exists / engine lacks IF NOT EXISTS: safe to ignore */
     }
   }
 }
