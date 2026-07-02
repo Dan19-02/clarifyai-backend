@@ -93,9 +93,10 @@ function assert(cond: any, label: string) {
   assert(conv.id === "conv-1" && conv.title === "Physics doubts", "conversation create");
 
   await addMessage(q, row.id, { id: "m1", conversationId: conv.id, role: "user", text: "Explain inertia", mode: "standard", sources: [] });
-  await addMessage(q, row.id, { id: "m1", conversationId: conv.id, role: "user", text: "dup", sources: [] }); // ON CONFLICT DO NOTHING
+  await addMessage(q, row.id, { id: "m1", conversationId: conv.id, role: "user", text: "Explain inertia (deep-checked)", sources: [] }); // upsert by id
   const msgs = await getMessages(q, row.id, conv.id, 50);
-  assert(msgs.length === 1, "messages append + dedupe by id (scoped to conversation)");
+  assert(msgs.length === 1, "messages dedupe by id (still one row after re-save)");
+  assert(msgs[0].text === "Explain inertia (deep-checked)", "re-saving a message id updates its text (deep-check replace)");
 
   const convList = await listConversations(q, row.id);
   assert(convList.length === 1 && convList[0].messageCount === 1, "conversation list reports message count");

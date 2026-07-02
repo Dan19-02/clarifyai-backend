@@ -272,10 +272,13 @@ export async function getMessages(q: Queryable, userId: number, conversationId: 
 }
 
 export async function addMessage(q: Queryable, userId: number, m: StoredMessage) {
+  // Upsert on id: re-saving an existing message updates its text and sources,
+  // which is how a Deep-checked (examiner-corrected) answer replaces the
+  // original in the study log.
   await q.query(
     `INSERT INTO messages (id, user_id, conversation_id, role, text, mode, sources, attachments)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-     ON CONFLICT (id) DO NOTHING`,
+     ON CONFLICT (id) DO UPDATE SET text = EXCLUDED.text, sources = EXCLUDED.sources`,
     [m.id, userId, m.conversationId, m.role, m.text, m.mode || null, JSON.stringify(m.sources || []), JSON.stringify(m.attachments || [])]
   );
   // Bump the conversation so the most recently used one floats to the top.

@@ -240,55 +240,6 @@ PUNCTUATION RULE (absolute, applies to EVERY reply)
 - NEVER use an em dash (Unicode U+2014) or an en dash (Unicode U+2013) anywhere in your output. These long horizontal dash characters are banned entirely.
 - Instead use a comma, a colon, a period, parentheses, or the word "to" for ranges, whichever fits the sentence best.
 
-HOW TO RESPOND, choose the right mode every time:
-1) CONVERSATIONAL mode: for greetings, diagnostic questions, replying to a student's attempt, short clarifications, and back-and-forth follow-ups. Be brief, warm, and human. Do NOT use the notebook structure here. When a student answers a practice question, NEVER criticize. Say "Nice attempt!" and gently correct any misconception while praising what they got right.
-2) CONCEPT NOTEBOOK mode: use ONLY when teaching or explaining a concept for the first time, or when the student asks you to explain or teach a topic. In this mode you ALWAYS give TWO things, in this exact order: first the EXAM-READY ANSWER (Part A), then the CONCEPT NOTEBOOK (Part B). Both are described below.
-
-Before teaching a brand-new complex topic, it is often best to ask ONE short diagnostic question first (in conversational mode) to gauge their level, unless the student clearly just wants the explanation right away.
-
-ALWAYS honour explicit student requests. If they ask for "just a quick answer," a summary, or a specific format, give them exactly that. Do NOT force the full structure.
-
-PART A: THE EXAM-READY ANSWER (always comes first in CONCEPT NOTEBOOK mode)
-Begin the reply with the heading "📝 Exam-Ready Answer" on its own line, then write the complete formal model answer the student should reproduce in the exam. This is the answer a strict examiner would award full marks. Make it:
-- Board-accurate: written exactly the way the student's board or exam wants it. CBSE answers are crisp and to the point with stepwise marking. ICSE and ISC reward fuller descriptive answers and complete derivations. JEE and NEET reward precise, correct application. Tailor this to the STUDENT CONTEXT given below.
-- Properly structured: a precise definition or statement first, then the key points, properties, or steps as a clean numbered or bulleted list, then a neat one line conclusion. Put the key terms an examiner looks for in **bold**.
-- Complete on formulae: state every formula in LaTeX and define each symbol with its unit.
-- Fully worked for numericals: show every step with its reason, then verify the final answer (check units, recompute or plug back a key step) before stating it.
-- Right sized: match the length and depth to how the board awards marks, neither padded nor too thin.
-This answer must be self contained and accurate, because the student will copy its structure into their exam.
-
-Then write a horizontal rule on its own line: ---
-
-PART B: THE CONCEPT NOTEBOOK (always comes second)
-Write the heading "📓 Understand It Deeply" on its own line, then help the student truly understand what they just read, so they can rewrite that exam answer in their own words with even better clarity, examples, and structure. Use these EXACT section headers, in this exact order, each on its own line, starting with "1. 🌟 Big Idea":
-
-1. 🌟 Big Idea
-One elegant sentence capturing the essence.
-
-2. 🤔 Everyday Analogy
-A vivid analogy from the student's world (use their preferred analogy style; lean on relatable Indian daily life such as cricket, trains, chai, mobile recharge, the kitchen, auto-rickshaws). Then explain how the analogy maps onto the concept.
-
-3. 📖 Simple Explanation
-A plain-language breakdown with no unnecessary jargon. Define any hard word the moment you use it.
-
-4. 🖼 Visual Representation
-A diagram the app will render. Use a Mermaid flowchart inside a \`\`\`mermaid code block, OR a Markdown table, OR clean labelled ASCII, whichever fits best. Keep node labels short.
-
-5. 🧠 Formal Definition
-The proper definition / scientific or mathematical statement, made accessible. Use LaTeX for ALL math: inline like $v = u + at$, display like $$E = mc^2$$.
-
-6. ✏ Worked Example
-A fully solved, step-by-step example. Show each step with its reasoning, then verify the final answer (check the units / recompute a key step). Use LaTeX for any math.
-
-7. ⚠ Common Mistakes
-The two or three misconceptions students usually have here, named gently and corrected.
-
-8. 🎯 Quick Check Question
-ONE thoughtful question the student must actively answer. Never "Do you understand?". Ask something that genuinely reveals their understanding.
-
-9. 📌 One-Line Summary
-One memorable, takeaway sentence.
-
 THE COMPREHENSION LOOP, STAY UNTIL IT CLICKS (this is the heart of Clarify.AI)
 A real teacher never moves on while a student is still lost, and never makes them feel slow for it. Neither do you. After you teach a concept and ask the Quick Check, the lesson is NOT over. You stay with the student until the idea genuinely lands. This patient, guaranteed catch-net is the entire promise of this app: the student can hear something confusing in class and stay calm, because they KNOW that here they can ask, and ask again, until it is clear.
 
@@ -332,6 +283,64 @@ HARD RULES (accuracy is non-negotiable)
 - Remember the punctuation rule: never use em dashes or en dashes, use commas, colons, periods, or parentheses instead.
 - Stay warm and encouraging from the first word to the last.`;
 
+// The default reply style: the student wants a clear answer NOW. Depth is one
+// tap away (the "Deep understanding" button), so quick answers stay quick.
+const QUICK_MODE_INSTRUCTION = `HOW TO RESPOND (QUICK ANSWER MODE, your default)
+The student wants a clear answer NOW. Reply short, precise, and warm:
+- Lead with the answer itself. No preamble, no section headers, no notebook structure, and NEVER the "📝 Exam-Ready Answer" heading in this mode.
+- Concept questions: aim for UNDER 120 words (3 to 8 sentences, or a few tight bullet points). At most one small analogy, and only when it genuinely helps. Trust the student to ask for more; a short clear answer respects their time.
+- Numericals and derivations: the complete worked solution, every step with its reason, then verify the final answer (units + plug back). Rigor is never cut, only padding.
+- Answer directly; do not open with a diagnostic question. You may end with ONE short check question or a gentle offer to go deeper when it fits naturally.
+- The app has a "Deep understanding" button that generates the full study notebook on demand, so never dump the full notebook here.
+- ALWAYS honour explicit student requests. If they ask for more detail, a summary, or a specific format, give them exactly that.
+- When a student answers a practice question, NEVER criticize. Say "Nice attempt!" and gently correct any misconception while praising what they got right.`;
+
+// The full study view, generated only when the student asks for it (the
+// "Deep understanding" button, or a Chapter Mastery study session).
+const DEEP_MODE_INSTRUCTION = `HOW TO RESPOND (DEEP UNDERSTANDING MODE)
+The student asked for the complete study view of this concept. You ALWAYS give TWO things, in this exact order: first the EXAM-READY ANSWER (Part A), then the CONCEPT NOTEBOOK (Part B).
+
+PART A: THE EXAM-READY ANSWER (always comes first)
+Begin the reply with the heading "📝 Exam-Ready Answer" on its own line, then write the complete formal model answer the student should reproduce in the exam. This is the answer a strict examiner would award full marks. Make it:
+- Board-accurate: written exactly the way the student's board or exam wants it. CBSE answers are crisp and to the point with stepwise marking. ICSE and ISC reward fuller descriptive answers and complete derivations. JEE and NEET reward precise, correct application. Tailor this to the STUDENT CONTEXT given below.
+- Properly structured: a precise definition or statement first, then the key points, properties, or steps as a clean numbered or bulleted list, then a neat one line conclusion. Put the key terms an examiner looks for in **bold**.
+- Complete on formulae: state every formula in LaTeX and define each symbol with its unit.
+- Fully worked for numericals: show every step with its reason, then verify the final answer (check units, recompute or plug back a key step) before stating it.
+- Right sized: match the length and depth to how the board awards marks, neither padded nor too thin.
+This answer must be self contained and accurate, because the student will copy its structure into their exam.
+
+Then write a horizontal rule on its own line: ---
+
+PART B: THE CONCEPT NOTEBOOK (always comes second)
+Write the heading "📓 Understand It Deeply" on its own line, then help the student truly understand what they just read, so they can rewrite that exam answer in their own words with even better clarity, examples, and structure. Use these EXACT section headers, in this exact order, each on its own line, starting with "1. 🌟 Big Idea":
+
+1. 🌟 Big Idea
+One elegant sentence capturing the essence.
+
+2. 🤔 Everyday Analogy
+A vivid analogy from the student's world (use their preferred analogy style; lean on relatable Indian daily life such as cricket, trains, chai, mobile recharge, the kitchen, auto-rickshaws). Then explain how the analogy maps onto the concept.
+
+3. 📖 Simple Explanation
+A plain-language breakdown with no unnecessary jargon. Define any hard word the moment you use it.
+
+4. 🖼 Visual Representation
+A diagram the app will render. Use a Mermaid flowchart inside a \`\`\`mermaid code block, OR a Markdown table, OR clean labelled ASCII, whichever fits best. Keep node labels short.
+
+5. 🧠 Formal Definition
+The proper definition / scientific or mathematical statement, made accessible. Use LaTeX for ALL math: inline like $v = u + at$, display like $$E = mc^2$$.
+
+6. ✏ Worked Example
+A fully solved, step-by-step example. Show each step with its reasoning, then verify the final answer (check the units / recompute a key step). Use LaTeX for any math.
+
+7. ⚠ Common Mistakes
+The two or three misconceptions students usually have here, named gently and corrected.
+
+8. 🎯 Quick Check Question
+ONE thoughtful question the student must actively answer. Never "Do you understand?". Ask something that genuinely reveals their understanding.
+
+9. 📌 One-Line Summary
+One memorable, takeaway sentence.`;
+
 // Heuristic auto-routing: pick the best path when the student leaves it on
 // "Standard" (most never switch). Math/derivations → reasoning ("thinking");
 // current-events / factual lookup → grounded Search; otherwise standard.
@@ -350,9 +359,11 @@ function classifyQuery(message: string): "standard" | "thinking" | "search" {
     return "thinking";
   }
 
-  // Current / real-time / factual lookup → grounded Search.
+  // Current / real-time / factual lookup → grounded Search. The weakest
+  // triggers ("right now", "live") were removed: they fired on teaching
+  // requests like "explain X right now" and "where do lions live".
   if (
-    /\b(latest|current|today|recent|nowadays|right now|live|this year|up to date|up-to-date)\b/.test(m) ||
+    /\b(latest|current|today|recent|nowadays|this year|up to date|up-to-date)\b/.test(m) ||
     /\b20[2-9]\d\b/.test(m) ||
     /\bwho (won|is the (current|present)|holds)\b/.test(m) ||
     /\b(price|cost) of\b/.test(m)
@@ -372,14 +383,17 @@ QUANTITATIVE / PROBLEM-SOLVING MODE, this question needs careful reasoning:
 - After the final answer, RE-CHECK it: verify the units and recompute or plug back a key step, then state the verified final answer clearly.
 - If the problem is missing data or is ambiguous, say what's missing rather than assuming.`;
 
-/** Build the full teaching system prompt (used by /chat). */
+/** Build the full teaching system prompt (used by /chat and /chat/stream). */
 function buildSystemInstruction(
   f: { board?: string; grade?: string; language?: string; preferredAnalogy?: string },
   referenceContext: string | null,
-  isQuant: boolean
+  isQuant: boolean,
+  deep: boolean
 ): string {
   return (
     `${CLARIFY_SYSTEM_INSTRUCTION}
+
+${deep ? DEEP_MODE_INSTRUCTION : QUICK_MODE_INSTRUCTION}
 
 STUDENT CONTEXT (tailor the depth, examples, exam framing, and language to this):
 - Board/Exam Target: ${f.board || "General Study"}
@@ -411,9 +425,14 @@ aiRouter.post("/chat", requireAuth, async (req: Request, res: Response) => {
       : [];
     const hasImages = images.length > 0;
 
-    // Auto-route when the student left it on the default "Standard" (most do).
+    // Auto-route every question (the mode toggles are gone from the UI; old
+    // clients that still send an explicit mode are honoured). A "deep" request
+    // (the Deep understanding button / Chapter Mastery study session) is a
+    // teaching view, so it never routes to search.
+    const deep = req.body?.deep === true;
     const requestedMode = mode || "standard";
-    const effectiveMode = requestedMode === "standard" ? classifyQuery(message) : requestedMode;
+    let effectiveMode = requestedMode === "standard" ? classifyQuery(message) : requestedMode;
+    if (deep && effectiveMode === "search") effectiveMode = "standard";
     const isQuant = effectiveMode === "thinking";
     const temperature = isQuant ? 0.3 : 0.6; // low temp for math accuracy, warmer for explanations
     if (requestedMode !== effectiveMode) console.log(`[AI] auto-routed: ${requestedMode} → ${effectiveMode}`);
@@ -422,13 +441,15 @@ aiRouter.post("/chat", requireAuth, async (req: Request, res: Response) => {
       !hasImages &&
       (effectiveMode === "standard" || effectiveMode === "thinking") &&
       (!Array.isArray(history) || history.length === 0);
-    const facets: CacheFacets = { mode: effectiveMode, board, grade, language, preferredAnalogy };
+    // Depth is part of the cache identity: a quick answer and a deep notebook
+    // for the same question must never serve each other.
+    const facets: CacheFacets = { mode: deep ? `${effectiveMode}:deep` : effectiveMode, board, grade, language, preferredAnalogy };
     const cacheKey = cacheable ? makeCacheKey({ ...facets, message }) : "";
     const deepVerify = req.body?.deepVerify === true;
     let queryEmbedding: number[] | null = null;
 
     console.log(
-      `[CHAT] start (requested=${requestedMode}, effective=${effectiveMode}, deepVerify=${deepVerify}, images=${images.length}, history=${Array.isArray(history) ? history.length : 0}, cacheable=${cacheable})`
+      `[CHAT] start (requested=${requestedMode}, effective=${effectiveMode}, deep=${deep}, deepVerify=${deepVerify}, images=${images.length}, history=${Array.isArray(history) ? history.length : 0}, cacheable=${cacheable})`
     );
     const logTotal = (path: string) => console.log(`[CHAT] total - ${secs(chatT0)} (${path})`);
 
@@ -564,7 +585,7 @@ aiRouter.post("/chat", requireAuth, async (req: Request, res: Response) => {
       if (referenceContext) console.log(`[RAG] grounded answer with curriculum context (board: ${board || "General"}).`);
     }
 
-    const systemInstruction = buildSystemInstruction({ board, grade, language, preferredAnalogy }, referenceContext, isQuant);
+    const systemInstruction = buildSystemInstruction({ board, grade, language, preferredAnalogy }, referenceContext, isQuant, deep);
 
     let modelName = "gemini-3.5-flash";
     const config: any = { systemInstruction, temperature };
@@ -676,8 +697,10 @@ aiRouter.post("/chat/stream", requireAuth, async (req: Request, res: Response) =
     const images = Array.isArray(req.body?.images)
       ? req.body.images.filter((im: any) => im && im.data && im.mimeType).slice(0, 6)
       : [];
+    const deep = req.body?.deep === true;
     const requestedMode = mode || "standard";
-    const effectiveMode = requestedMode === "standard" ? classifyQuery(message) : requestedMode;
+    let effectiveMode = requestedMode === "standard" ? classifyQuery(message) : requestedMode;
+    if (deep && effectiveMode === "search") effectiveMode = "standard";
     const deepVerify = req.body?.deepVerify === true;
 
     // Only the open-source text path streams; everything else uses /chat.
@@ -697,11 +720,11 @@ aiRouter.post("/chat/stream", requireAuth, async (req: Request, res: Response) =
     const isQuant = effectiveMode === "thinking";
     const temperature = isQuant ? 0.3 : 0.6;
     const cacheable = !Array.isArray(history) || history.length === 0;
-    const facets: CacheFacets = { mode: effectiveMode, board, grade, language, preferredAnalogy };
+    const facets: CacheFacets = { mode: deep ? `${effectiveMode}:deep` : effectiveMode, board, grade, language, preferredAnalogy };
     const cacheKey = cacheable ? makeCacheKey({ ...facets, message }) : "";
     let queryEmbedding: number[] | null = null;
 
-    console.log(`[CHAT_STREAM] start (requested=${requestedMode}, effective=${effectiveMode}, deepVerify=${deepVerify}, cacheable=${cacheable})`);
+    console.log(`[CHAT_STREAM] start (requested=${requestedMode}, effective=${effectiveMode}, deep=${deep}, deepVerify=${deepVerify}, cacheable=${cacheable})`);
 
     // Serve a cached answer over the stream with the same Deep-check honesty
     // as /chat: unverified hits are examined now and upgraded.
@@ -774,7 +797,7 @@ aiRouter.post("/chat/stream", requireAuth, async (req: Request, res: Response) =
     if (queryEmbedding) {
       referenceContext = await safe(() => retrieveContext(queryEmbedding, board));
     }
-    const systemInstruction = buildSystemInstruction({ board, grade, language, preferredAnalogy }, referenceContext, isQuant);
+    const systemInstruction = buildSystemInstruction({ board, grade, language, preferredAnalogy }, referenceContext, isQuant, deep);
 
     // Stream the draft. Any failure here (timeout, HTTP error, empty stream)
     // hands the request back to the client, which retries on /chat with
@@ -833,6 +856,28 @@ aiRouter.post("/chat/stream", requireAuth, async (req: Request, res: Response) =
     console.warn(`[CHAT_STREAM] total - ${secs(chatT0)} (FAILED: ${error?.message || error})`);
     send({ type: "error", error: error?.message || "An error occurred during content generation." });
     res.end();
+  }
+});
+
+/**
+ * On-demand Deep-check: the examiner pass runs on an EXISTING answer when the
+ * student taps "Deep-check" under it (replaces the old pre-request toggle).
+ * Returns the corrected text plus an honest verification status.
+ */
+aiRouter.post("/chat/verify", requireAuth, async (req: Request, res: Response) => {
+  try {
+    const uid = (req as any).userId as number;
+    if (!rateLimit(`${uid}:chat`, 30)) {
+      return res.status(429).json({ error: "You're sending requests very fast. Take a breath and try again in a moment. 🌱" });
+    }
+    const question = typeof req.body?.question === "string" ? req.body.question : "";
+    const text = typeof req.body?.text === "string" ? req.body.text : "";
+    if (!text.trim()) return res.status(400).json({ error: "There is no answer text to check." });
+    const v = await verifyAnswer(question || "Check this answer for correctness.", text);
+    res.json({ text: v.text, verification: v.verified ? "passed" : "unavailable" });
+  } catch (error: any) {
+    console.error("Verify API error:", error);
+    res.status(500).json({ error: error.message || "Deep-check failed." });
   }
 });
 
