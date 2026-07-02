@@ -10,7 +10,24 @@ import { aiRouter, attachLiveWebSocket } from "./ai.js";
 import { ingestKnowledge } from "./knowledge.js";
 
 const app = express();
-app.use(cors({ origin: process.env.CORS_ORIGIN || "*" }));
+
+// CORS_ORIGIN may be a single origin, a comma-separated list (apex + www +
+// the Render preview URL), or "*". A list is matched exactly per request.
+const corsOrigins = (process.env.CORS_ORIGIN || "*")
+  .split(",")
+  .map((o) => o.trim())
+  .filter(Boolean);
+app.use(
+  cors({
+    origin: corsOrigins.includes("*")
+      ? "*"
+      : (origin, cb) => {
+          // Allow same-origin / server-to-server (no Origin header) and any listed origin.
+          if (!origin || corsOrigins.includes(origin)) return cb(null, true);
+          return cb(new Error(`Origin ${origin} not allowed by CORS`));
+        },
+  })
+);
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 
