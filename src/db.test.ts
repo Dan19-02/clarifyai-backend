@@ -19,9 +19,12 @@ import {
   deleteConversation,
   cacheGetByKey,
   cacheUpsertFull,
+  cacheCandidates,
+  cacheMarkVerified,
   knowledgeInsert,
   knowledgeCount,
   knowledgeAll,
+  knowledgeDeleteAll,
   rowToUser,
 } from "./db.js";
 
@@ -106,11 +109,34 @@ function assert(cond: any, label: string) {
   await cacheUpsertFull(q, { cacheKey: "k1", ...facets, question: "what is inertia", embedding: [0.1, 0.2, 0.3], text: "updated answer", sources: [] }); // upsert
   const cached = await cacheGetByKey(q, "k1");
   assert(cached && cached.text === "updated answer", "explanation cache upsert + read by key");
+  assert(cached && cached.verified === false, "cache entries are unverified by default");
+
+  // Deep-verify bookkeeping: verified writes round-trip, candidates expose the
+  // flag + key (so unverified semantic hits can be examined and upgraded), and
+  // cacheMarkVerified upgrades an entry with the examiner's (corrected) text.
+  await cacheUpsertFull(q, { cacheKey: "k2", ...facets, question: "newton second law", embedding: [0.2, 0.1, 0], text: "deep-checked answer", sources: [], verified: true });
+  const cached2 = await cacheGetByKey(q, "k2");
+  assert(cached2 !== null && cached2.verified === true, "verified flag round-trips through upsert + read");
+
+  const cands = await cacheCandidates(q, facets);
+  assert(
+    cands.length === 2 && cands.every((c) => typeof c.verified === "boolean" && typeof c.cacheKey === "string" && c.cacheKey.length > 0),
+    "semantic candidates expose cacheKey + verified"
+  );
+
+  await cacheMarkVerified(q, "k1", "corrected answer");
+  const upgraded = await cacheGetByKey(q, "k1");
+  assert(upgraded !== null && upgraded.verified === true && upgraded.text === "corrected answer", "cacheMarkVerified upgrades text + flag");
 
   await knowledgeInsert(q, { id: "kc1", subject: "Physics", topic: "Inertia", board: "CBSE", grade: "11", content: "Inertia note", embedding: [0.1, 0.2, 0.3] });
   assert((await knowledgeCount(q)) === 1, "knowledge insert + count");
   const chunks = await knowledgeAll(q);
   assert(chunks.length === 1 && Array.isArray(chunks[0].embedding), "knowledge embedding round-trips as a JS array");
+
+  // Stale-embedding recovery path (cacheClearMismatchedEmbeddings uses
+  // jsonb_array_length, which pg-mem lacks; its call site is try/catch-safe).
+  await knowledgeDeleteAll(q);
+  assert((await knowledgeCount(q)) === 0, "knowledgeDeleteAll purges the corpus for re-ingestion");
 
   console.log("\nDB SMOKE TEST PASSED ✓");
   process.exit(0);

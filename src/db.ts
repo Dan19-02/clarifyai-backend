@@ -118,6 +118,7 @@ CREATE TABLE IF NOT EXISTS explanation_cache (
   embedding JSONB,
   text TEXT NOT NULL,
   sources JSONB NOT NULL DEFAULT '[]'::jsonb,
+  verified BOOLEAN NOT NULL DEFAULT FALSE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -134,10 +135,11 @@ CREATE TABLE IF NOT EXISTS knowledge_chunks (
 
 export async function initSchema(q: Queryable = pool): Promise<void> {
   await q.query(SCHEMA_SQL);
-  // Defensive migrations for databases created before conversations existed.
+  // Defensive migrations for databases created before newer columns existed.
   for (const sql of [
     `ALTER TABLE messages ADD COLUMN IF NOT EXISTS conversation_id TEXT`,
     `ALTER TABLE messages ADD COLUMN IF NOT EXISTS attachments JSONB NOT NULL DEFAULT '[]'::jsonb`,
+    `ALTER TABLE explanation_cache ADD COLUMN IF NOT EXISTS verified BOOLEAN NOT NULL DEFAULT FALSE`,
   ]) {
     try {
       await q.query(sql);
@@ -340,6 +342,8 @@ export async function ensureDefaultConversation(q: Queryable, userId: number, ne
 export interface CachedAnswer {
   text: string;
   sources: { title: string; uri: string }[];
+  /** True when this answer has been through the deep-verify examiner pass. */
+  verified: boolean;
 }
 
 export interface CacheFacets {
@@ -352,24 +356,31 @@ export interface CacheFacets {
 
 /** Exact cache lookup by hashed key. */
 export async function cacheGetByKey(q: Queryable, key: string): Promise<CachedAnswer | null> {
-  const { rows } = await q.query(`SELECT text, sources FROM explanation_cache WHERE cache_key = $1`, [key]);
+  const { rows } = await q.query(`SELECT text, sources, verified FROM explanation_cache WHERE cache_key = $1`, [key]);
   if (!rows[0]) return null;
-  return { text: rows[0].text, sources: rows[0].sources || [] };
+  return { text: rows[0].text, sources: rows[0].sources || [], verified: rows[0].verified === true };
 }
 
 /** Candidate cache rows (same facets) for semantic (embedding) matching. */
 export async function cacheCandidates(
   q: Queryable,
   f: CacheFacets
-): Promise<{ embedding: number[] | null; text: string; sources: any[]; question: string }[]> {
+): Promise<{ cacheKey: string; embedding: number[] | null; text: string; sources: any[]; question: string; verified: boolean }[]> {
   const { rows } = await q.query(
-    `SELECT embedding, text, sources, question FROM explanation_cache
+    `SELECT cache_key, embedding, text, sources, question, verified FROM explanation_cache
      WHERE mode = $1 AND board = $2 AND grade = $3 AND language = $4 AND preferred_analogy = $5
        AND embedding IS NOT NULL
      LIMIT 300`,
     [f.mode, f.board ?? "", f.grade ?? "", f.language ?? "", f.preferredAnalogy ?? ""]
   );
-  return rows.map((r) => ({ embedding: r.embedding, text: r.text, sources: r.sources || [], question: r.question || "" }));
+  return rows.map((r) => ({
+    cacheKey: r.cache_key,
+    embedding: r.embedding,
+    text: r.text,
+    sources: r.sources || [],
+    question: r.question || "",
+    verified: r.verified === true,
+  }));
 }
 
 export interface CacheUpsert extends CacheFacets {
@@ -378,13 +389,15 @@ export interface CacheUpsert extends CacheFacets {
   embedding: number[] | null;
   text: string;
   sources: any[];
+  /** Whether the deep-verify examiner pass actually ran on this text. */
+  verified?: boolean;
 }
 
 export async function cacheUpsertFull(q: Queryable, r: CacheUpsert): Promise<void> {
   await q.query(
-    `INSERT INTO explanation_cache (cache_key, mode, board, grade, language, preferred_analogy, question, embedding, text, sources)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-     ON CONFLICT (cache_key) DO UPDATE SET text = EXCLUDED.text, sources = EXCLUDED.sources, embedding = EXCLUDED.embedding`,
+    `INSERT INTO explanation_cache (cache_key, mode, board, grade, language, preferred_analogy, question, embedding, text, sources, verified)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+     ON CONFLICT (cache_key) DO UPDATE SET text = EXCLUDED.text, sources = EXCLUDED.sources, embedding = EXCLUDED.embedding, verified = EXCLUDED.verified`,
     [
       r.cacheKey,
       r.mode,
@@ -396,8 +409,17 @@ export async function cacheUpsertFull(q: Queryable, r: CacheUpsert): Promise<voi
       r.embedding ? JSON.stringify(r.embedding) : null,
       r.text,
       JSON.stringify(r.sources || []),
+      r.verified === true,
     ]
   );
+}
+
+/**
+ * Upgrade a cache entry after a successful examiner pass on its text (the
+ * examiner may also have corrected the answer, so the text is replaced too).
+ */
+export async function cacheMarkVerified(q: Queryable, cacheKey: string, text: string): Promise<void> {
+  await q.query(`UPDATE explanation_cache SET text = $2, verified = TRUE WHERE cache_key = $1`, [cacheKey, text]);
 }
 
 // ---- Knowledge base (RAG) ----
@@ -429,4 +451,22 @@ export async function knowledgeAll(
 ): Promise<{ subject: string; topic: string; board: string; content: string; embedding: number[] }[]> {
   const { rows } = await q.query(`SELECT subject, topic, board, content, embedding FROM knowledge_chunks`);
   return rows.map((r) => ({ subject: r.subject, topic: r.topic, board: r.board, content: r.content, embedding: r.embedding }));
+}
+
+/** Purge the knowledge base (used when stored vectors no longer match the live embedding model). */
+export async function knowledgeDeleteAll(q: Queryable): Promise<void> {
+  await q.query(`DELETE FROM knowledge_chunks`);
+}
+
+/**
+ * Null out cached-answer embeddings whose dimension doesn't match the live
+ * embedding model. Mismatched vectors can never score above 0, so they only
+ * waste candidate scans; the rows stay usable for exact-key lookups.
+ */
+export async function cacheClearMismatchedEmbeddings(q: Queryable, dims: number): Promise<void> {
+  await q.query(
+    `UPDATE explanation_cache SET embedding = NULL
+     WHERE embedding IS NOT NULL AND jsonb_array_length(embedding) <> $1`,
+    [dims]
+  );
 }

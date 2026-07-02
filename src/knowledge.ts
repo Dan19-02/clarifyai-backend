@@ -12,29 +12,41 @@
  * - verifyAnswer(): optional deep-verify examiner pass.
  */
 import { ai, apiKey } from "./gemini.js";
-import { pool, knowledgeCount, knowledgeInsert, knowledgeAll } from "./db.js";
+import { pool, knowledgeCount, knowledgeInsert, knowledgeAll, knowledgeDeleteAll, cacheClearMismatchedEmbeddings } from "./db.js";
 
-const EMBED_MODELS = ["text-embedding-004", "gemini-embedding-001"];
+// gemini-embedding-001 is the live embeddings model. text-embedding-004 was
+// retired from the API (404s as of 2026-07-02) and is no longer tried.
+const EMBED_MODELS = ["gemini-embedding-001"];
 let chosenEmbedModel: string | null = null;
+
+/** Seconds elapsed since t0, formatted for the latency trace logs. */
+export const secs = (t0: number) => ((Date.now() - t0) / 1000).toFixed(1) + "s";
 
 export async function embed(text: string, taskType = "SEMANTIC_SIMILARITY"): Promise<number[] | null> {
   if (!apiKey || !text?.trim()) return null;
   const models = chosenEmbedModel ? [chosenEmbedModel] : EMBED_MODELS;
+  const embedT0 = Date.now();
   for (const model of models) {
     // Try with taskType first; fall back to no-config if the model rejects it.
     for (const cfg of [{ taskType }, undefined] as const) {
+      const t0 = Date.now();
+      console.log(`[GEMINI_EMBED] start (model=${model}, cfg=${cfg ? "taskType" : "plain"})`);
       try {
         const r: any = await ai.models.embedContent({ model, contents: text, ...(cfg ? { config: cfg } : {}) });
         const values: number[] | undefined = r?.embeddings?.[0]?.values || r?.embedding?.values;
         if (Array.isArray(values) && values.length) {
           chosenEmbedModel = model;
+          console.log(`[GEMINI_EMBED] end - ${secs(t0)} (model=${model}, dims=${values.length})`);
           return values;
         }
-      } catch {
-        /* try next config / model */
+        console.warn(`[GEMINI_EMBED] empty - ${secs(t0)} (model=${model}), trying next`);
+      } catch (e: any) {
+        // Each failed attempt here may itself hide up to 5 SDK-internal retries.
+        console.warn(`[GEMINI_EMBED] failed - ${secs(t0)} (model=${model}, cfg=${cfg ? "taskType" : "plain"}): ${e?.message || e}`);
       }
     }
   }
+  console.warn(`[GEMINI_EMBED] gave up - ${secs(embedT0)} (all models/configs failed)`);
   return null;
 }
 
@@ -117,14 +129,29 @@ const SEED_CORPUS = [
 /** Embed and store the seed corpus once (idempotent). */
 export async function ingestKnowledge(): Promise<void> {
   try {
-    const existing = await knowledgeCount(pool);
-    if (existing > 0) {
-      console.log(`[RAG] Knowledge base ready (${existing} chunks, multi-board).`);
-      return;
-    }
     if (!apiKey) {
       console.warn("[RAG] No GEMINI_API_KEY: skipping knowledge ingestion (RAG disabled).");
       return;
+    }
+    const existing = await knowledgeCount(pool);
+    if (existing > 0) {
+      // Vectors only match when their dimensions agree, so rows embedded by a
+      // retired model (768-dim text-embedding-004) silently kill RAG and the
+      // semantic cache. Probe the live model once and re-ingest on mismatch.
+      const probe = await embed("dimension probe");
+      const rows = probe ? await knowledgeAll(pool) : [];
+      const stale = probe ? rows.some((r) => Array.isArray(r.embedding) && r.embedding.length !== probe.length) : false;
+      if (!stale) {
+        console.log(`[RAG] Knowledge base ready (${existing} chunks, multi-board).`);
+        return;
+      }
+      console.warn(`[RAG] Stored embeddings do not match the live model (${probe!.length} dims): re-ingesting the corpus and clearing mismatched cache vectors.`);
+      await knowledgeDeleteAll(pool);
+      try {
+        await cacheClearMismatchedEmbeddings(pool, probe!.length);
+      } catch {
+        /* engine without jsonb_array_length: harmless, stale vectors simply never match */
+      }
     }
     let ok = 0;
     for (const c of SEED_CORPUS) {
@@ -173,9 +200,22 @@ export async function retrieveContext(
     .join("\n\n");
 }
 
+export interface VerifyResult {
+  text: string;
+  /** True only when the examiner pass actually ran. False means the draft is
+   *  returned unverified (missing key or examiner call failed), and the caller
+   *  must surface that honestly rather than implying the answer was checked. */
+  verified: boolean;
+}
+
 /** Optional deep-verify: a meticulous examiner pass that corrects errors. */
-export async function verifyAnswer(question: string, answer: string): Promise<string> {
-  if (!apiKey) return answer;
+export async function verifyAnswer(question: string, answer: string): Promise<VerifyResult> {
+  if (!apiKey) {
+    console.warn("[Verify] Deep-check unavailable: GEMINI_API_KEY missing, returning the answer unverified.");
+    return { text: answer, verified: false };
+  }
+  const t0 = Date.now();
+  console.log(`[GEMINI_VERIFY] start (draft chars=${answer.length})`);
   try {
     const r = await ai.models.generateContent({
       model: "gemini-3.5-flash",
@@ -199,8 +239,15 @@ export async function verifyAnswer(question: string, answer: string): Promise<st
           "You are a meticulous subject examiner for Indian board/JEE/NEET material. You fix factual and mathematical errors in tutoring answers while preserving the warm tone and any section/notebook formatting. Output only the (corrected) answer.",
       },
     });
-    return r.text || answer;
-  } catch {
-    return answer;
+    // An empty examiner response means nothing was actually checked.
+    if (!r.text) {
+      console.warn(`[GEMINI_VERIFY] empty - ${secs(t0)}, treating the answer as unverified.`);
+      return { text: answer, verified: false };
+    }
+    console.log(`[GEMINI_VERIFY] end - ${secs(t0)} (chars=${r.text.length})`);
+    return { text: r.text, verified: true };
+  } catch (e: any) {
+    console.warn(`[GEMINI_VERIFY] failed - ${secs(t0)}, returning the answer unverified: ${e?.message || e}`);
+    return { text: answer, verified: false };
   }
 }

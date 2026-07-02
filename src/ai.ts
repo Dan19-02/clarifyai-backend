@@ -15,11 +15,12 @@ import {
   cacheGetByKey,
   cacheCandidates,
   cacheUpsertFull,
+  cacheMarkVerified,
   type CachedAnswer,
   type CacheFacets,
 } from "./db.js";
 import { ai, apiKey } from "./gemini.js";
-import { embed, cosine, retrieveContext, verifyAnswer, topicTokens, topicCompatible } from "./knowledge.js";
+import { embed, cosine, retrieveContext, verifyAnswer, topicTokens, topicCompatible, secs } from "./knowledge.js";
 
 if (!apiKey) {
   console.warn("[AI] GEMINI_API_KEY missing: chat/tts/image/live will error until it is set.");
@@ -30,7 +31,13 @@ const osBaseUrl = process.env.OPENSOURCE_BASE_URL;
 const osApiKey = process.env.OPENSOURCE_API_KEY;
 const osModel = process.env.OPENSOURCE_MODEL;
 const openSourceEnabled = Boolean(osBaseUrl && osModel);
-if (openSourceEnabled) console.log(`[AI] Open-source generation enabled: ${osModel} @ ${osBaseUrl}`);
+// How long to wait for the open-source brain before falling back to Gemini.
+// The free NVIDIA NIM tier can queue for minutes (measured 170s on a routine
+// answer), so this caps the dead wait. On a paid MiniMax plan that responds in
+// single-digit seconds, set OPENSOURCE_TIMEOUT_MS=20000 or lower.
+const OS_TIMEOUT_MS = Math.max(5_000, Number(process.env.OPENSOURCE_TIMEOUT_MS) || 45_000);
+if (openSourceEnabled)
+  console.log(`[AI] Open-source generation enabled: ${osModel} @ ${osBaseUrl} (timeout ${OS_TIMEOUT_MS / 1000}s, then Gemini fallback)`);
 
 function toOpenAIMessages(history: any, userContent: string) {
   const messages: { role: string; content: string }[] = [];
@@ -45,10 +52,13 @@ async function callOpenSource(
   systemInstruction: string,
   messages: { role: string; content: string }[],
   temperature = 0.7,
-  timeoutMs = 180_000
+  timeoutMs = OS_TIMEOUT_MS,
+  traceLabel = "MINIMAX_GENERATE"
 ): Promise<string> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const t0 = Date.now();
+  console.log(`[${traceLabel}] start (model=${osModel}, timeout=${timeoutMs / 1000}s). Single attempt, NO retry here; on failure the caller falls back to a full Gemini generation.`);
   try {
     const resp = await fetch(`${osBaseUrl!.replace(/\/$/, "")}/chat/completions`, {
       method: "POST",
@@ -67,15 +77,118 @@ async function callOpenSource(
     const msg = data.choices?.[0]?.message;
     const text = msg?.content || msg?.reasoning_content;
     if (!text) throw new Error("Open-source model returned an empty response.");
+    console.log(`[${traceLabel}] end - ${secs(t0)} (chars=${text.length})`);
     return text;
+  } catch (e: any) {
+    const reason = controller.signal.aborted ? `TIMED OUT at ${timeoutMs / 1000}s` : e?.message || e;
+    console.warn(`[${traceLabel}] failed - ${secs(t0)}: ${reason}`);
+    throw e;
   } finally {
     clearTimeout(timer);
+  }
+}
+
+// Once a stream is alive, a healthy long answer must never be cut off, so the
+// full timeout only guards the FIRST token; after that a rolling idle timer
+// aborts only if the model goes silent mid-answer.
+const STREAM_IDLE_TIMEOUT_MS = 30_000;
+
+/**
+ * Stream deltas from the OpenAI-compatible endpoint (stream: true). Yields
+ * each content delta as it arrives. Throws on HTTP errors, an empty stream,
+ * no first token within OS_TIMEOUT_MS, or mid-stream silence.
+ */
+async function* streamOpenSource(
+  systemInstruction: string,
+  messages: { role: string; content: string }[],
+  temperature = 0.7
+): AsyncGenerator<string> {
+  const controller = new AbortController();
+  let timer = setTimeout(() => controller.abort(), OS_TIMEOUT_MS);
+  const armIdleTimer = () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => controller.abort(), STREAM_IDLE_TIMEOUT_MS);
+  };
+  const t0 = Date.now();
+  let chars = 0;
+  let gotFirst = false;
+  console.log(`[MINIMAX_STREAM] start (model=${osModel}, firstTokenTimeout=${OS_TIMEOUT_MS / 1000}s)`);
+  try {
+    const resp = await fetch(`${osBaseUrl!.replace(/\/$/, "")}/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...(osApiKey ? { Authorization: `Bearer ${osApiKey}` } : {}) },
+      body: JSON.stringify({
+        model: osModel,
+        messages: [{ role: "system", content: systemInstruction }, ...messages],
+        temperature,
+        max_tokens: 8192,
+        stream: true,
+      }),
+      signal: controller.signal,
+    });
+    if (!resp.ok || !resp.body) throw new Error(`Open-source model HTTP ${resp.status}: ${(await resp.text()).slice(0, 200)}`);
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split("\n");
+      buf = lines.pop() || "";
+      for (const line of lines) {
+        const data = line.trim();
+        if (!data.startsWith("data:")) continue;
+        const payload = data.slice(5).trim();
+        if (payload === "[DONE]") continue;
+        try {
+          const delta: string | undefined = JSON.parse(payload)?.choices?.[0]?.delta?.content;
+          if (delta) {
+            if (!gotFirst) {
+              gotFirst = true;
+              console.log(`[MINIMAX_STREAM] first token - ${secs(t0)}`);
+            }
+            chars += delta.length;
+            armIdleTimer();
+            yield delta;
+          }
+        } catch {
+          /* keepalive / partial frame: ignore */
+        }
+      }
+    }
+    if (chars === 0) throw new Error("Open-source model streamed an empty response.");
+    console.log(`[MINIMAX_STREAM] end - ${secs(t0)} (chars=${chars})`);
+  } catch (e: any) {
+    const reason = controller.signal.aborted
+      ? gotFirst
+        ? `stream went silent for ${STREAM_IDLE_TIMEOUT_MS / 1000}s`
+        : `no first token within ${OS_TIMEOUT_MS / 1000}s`
+      : e?.message || e;
+    console.warn(`[MINIMAX_STREAM] failed - ${secs(t0)}: ${reason}`);
+    throw e;
+  } finally {
+    clearTimeout(timer);
+    // Also reached when the consumer stops early (client disconnected): kill
+    // the upstream request instead of letting the model generate into a void.
+    controller.abort();
   }
 }
 
 // ---- Shared explanation cache (in-memory + Postgres) ----
 const memCache = new Map<string, CachedAnswer>();
 const MEM_CACHE_MAX = 1000;
+
+/** Every write goes through here so the cap holds on ALL paths (generation,
+ *  DB-hit promotion, verify upgrades); bare memCache.set calls leak past it. */
+function memCacheSet(key: string, value: CachedAnswer): void {
+  if (!memCache.has(key) && memCache.size >= MEM_CACHE_MAX) {
+    const oldest = memCache.keys().next().value;
+    if (oldest) memCache.delete(oldest);
+  }
+  memCache.set(key, value);
+}
 // Cosine threshold for semantic cache reuse. Conservative on purpose: a WRONG
 // reuse (e.g. osmosis answer for a diffusion question) hurts more than a miss.
 // text-embedding-004 paraphrases score ~0.81 and near-different concepts ~0.85,
@@ -283,6 +396,7 @@ STUDENT CONTEXT (tailor the depth, examples, exam framing, and language to this)
 export const aiRouter = Router();
 
 aiRouter.post("/chat", requireAuth, async (req: Request, res: Response) => {
+  const chatT0 = Date.now();
   try {
     const { message, history, mode, board, grade, language, preferredAnalogy } = req.body;
     const uid = (req as any).userId as number;
@@ -313,19 +427,55 @@ aiRouter.post("/chat", requireAuth, async (req: Request, res: Response) => {
     const deepVerify = req.body?.deepVerify === true;
     let queryEmbedding: number[] | null = null;
 
+    console.log(
+      `[CHAT] start (requested=${requestedMode}, effective=${effectiveMode}, deepVerify=${deepVerify}, images=${images.length}, history=${Array.isArray(history) ? history.length : 0}, cacheable=${cacheable})`
+    );
+    const logTotal = (path: string) => console.log(`[CHAT] total - ${secs(chatT0)} (${path})`);
+
+    // Serve a cache hit honestly under Deep-check: a hit that never went
+    // through the examiner pass is verified NOW (and the entry upgraded), so
+    // Deep-check ON can never silently return an unexamined answer.
+    const serveCachedHit = async (
+      hit: { text: string; sources: any[] },
+      upgrade: (verifiedText: string) => Promise<void>
+    ) => {
+      const v = await verifyAnswer(message, hit.text);
+      if (v.verified) {
+        await upgrade(v.text);
+        logTotal("cache hit + deep-check upgrade");
+        return res.json({ text: v.text, sources: hit.sources || [], cached: true, verification: "passed" });
+      }
+      logTotal("cache hit, deep-check unavailable");
+      return res.json({ text: hit.text, sources: hit.sources || [], cached: true, verification: "unavailable" });
+    };
+
     if (cacheable) {
       // 1) Exact cache hit (instant).
+      const exactT0 = Date.now();
       const exact = memCache.get(cacheKey) || (await safe(() => cacheGetByKey(pool, cacheKey)));
+      console.log(`[CACHE_EXACT] end - ${secs(exactT0)} (${exact ? "hit" : "miss"})`);
       if (exact) {
-        memCache.set(cacheKey, exact);
-        return res.json({ text: exact.text, sources: exact.sources || [], cached: true });
+        if (!deepVerify || exact.verified) {
+          memCacheSet(cacheKey, exact);
+          logTotal("exact cache hit");
+          return res.json({
+            text: exact.text,
+            sources: exact.sources || [],
+            cached: true,
+            ...(deepVerify ? { verification: "passed" } : {}),
+          });
+        }
+        return serveCachedHit(exact, async (verifiedText) => {
+          memCacheSet(cacheKey, { text: verifiedText, sources: exact.sources || [], verified: true });
+          await safe(() => cacheMarkVerified(pool, cacheKey, verifiedText));
+        });
       }
       // 2) Semantic cache: embed once (reused for RAG) and match near-duplicates.
       queryEmbedding = await embed(message);
       if (queryEmbedding) {
         const qTokens = topicTokens(message);
         const candidates = (await safe(() => cacheCandidates(pool, facets))) || [];
-        let best: { text: string; sources: any[] } | null = null;
+        let best: { cacheKey: string; text: string; sources: any[]; verified: boolean } | null = null;
         let bestScore = 0;
         for (const c of candidates) {
           if (!c.embedding) continue;
@@ -340,20 +490,35 @@ aiRouter.post("/chat", requireAuth, async (req: Request, res: Response) => {
         if (best) console.log(`[Cache] best topic-gated semantic score ${bestScore.toFixed(3)} (threshold ${SEMANTIC_THRESHOLD})`);
         if (best && bestScore >= SEMANTIC_THRESHOLD) {
           console.log(`[Cache] semantic hit (score ${bestScore.toFixed(3)}).`);
-          return res.json({ text: best.text, sources: best.sources || [], cached: true });
+          if (!deepVerify || best.verified) {
+            logTotal("semantic cache hit");
+            return res.json({
+              text: best.text,
+              sources: best.sources || [],
+              cached: true,
+              ...(deepVerify ? { verification: "passed" } : {}),
+            });
+          }
+          const bestKey = best.cacheKey;
+          return serveCachedHit(best, async (verifiedText) => {
+            await safe(() => cacheMarkVerified(pool, bestKey, verifiedText));
+          });
         }
       }
     }
 
     const finish = async (text: string, sources: CachedAnswer["sources"]) => {
-      const finalText = deepVerify ? await verifyAnswer(message, text) : text;
+      let finalText = text;
+      let verified = false;
+      if (deepVerify) {
+        const v = await verifyAnswer(message, text);
+        finalText = v.text;
+        verified = v.verified;
+      }
       if (cacheable) {
-        const value = { text: finalText, sources: sources || [] };
-        if (memCache.size >= MEM_CACHE_MAX) {
-          const oldest = memCache.keys().next().value;
-          if (oldest) memCache.delete(oldest);
-        }
-        memCache.set(cacheKey, value);
+        // The verified flag records whether the examiner pass actually ran, so
+        // later Deep-check requests know whether this entry still needs one.
+        memCacheSet(cacheKey, { text: finalText, sources: sources || [], verified });
         await safe(() =>
           cacheUpsertFull(pool, {
             cacheKey,
@@ -362,16 +527,28 @@ aiRouter.post("/chat", requireAuth, async (req: Request, res: Response) => {
             embedding: queryEmbedding,
             text: finalText,
             sources: sources || [],
+            verified,
           })
         );
       }
-      res.json({ text: finalText, sources: sources || [] });
+      logTotal(`generated (mode=${effectiveMode}, verify=${deepVerify ? (verified ? "passed" : "unavailable") : "off"})`);
+      res.json({
+        text: finalText,
+        sources: sources || [],
+        ...(deepVerify ? { verification: verified ? "passed" : "unavailable" } : {}),
+      });
     };
 
     // MiniMax is the brain for Standard + Thinking (text), so Gemini isn't
     // required for those, it is only needed for Search grounding, image vision,
-    // and as a fallback when MiniMax is unavailable.
-    const usesOpenSourceBrain = (effectiveMode === "standard" || effectiveMode === "thinking") && openSourceEnabled && !hasImages;
+    // and as a fallback when MiniMax is unavailable. A client that just watched
+    // a /chat/stream attempt fail sends avoidOpenSource so we don't make it
+    // sit through a second MiniMax timeout before the Gemini fallback. The flag
+    // is advisory: when Gemini cannot serve at all (no key), MiniMax is still
+    // tried, because a slow answer beats a guaranteed 500.
+    const avoidOpenSource = req.body?.avoidOpenSource === true && Boolean(apiKey);
+    const usesOpenSourceBrain =
+      (effectiveMode === "standard" || effectiveMode === "thinking") && openSourceEnabled && !hasImages && !avoidOpenSource;
     const needsGemini = !usesOpenSourceBrain;
     if (!apiKey && needsGemini) {
       return res.status(500).json({ error: "GEMINI_API_KEY is missing on the server." });
@@ -381,7 +558,9 @@ aiRouter.post("/chat", requireAuth, async (req: Request, res: Response) => {
     // semantic-cache step; first-turn, non-search questions only).
     let referenceContext: string | null = null;
     if (queryEmbedding && effectiveMode !== "search") {
+      const ragT0 = Date.now();
       referenceContext = await safe(() => retrieveContext(queryEmbedding, board));
+      console.log(`[RAG_RETRIEVE] end - ${secs(ragT0)} (${referenceContext ? "context found" : "no match"}, local DB + JS cosine, no external call)`);
       if (referenceContext) console.log(`[RAG] grounded answer with curriculum context (board: ${board || "General"}).`);
     }
 
@@ -411,7 +590,7 @@ aiRouter.post("/chat", requireAuth, async (req: Request, res: Response) => {
     // image vision (uploads), TTS, and live voice. Skipped here when files are
     // attached, since MiniMax can't see images, those fall through to Gemini.
     // If MiniMax is unavailable, we fall back to Gemini below.
-    if ((effectiveMode === "standard" || effectiveMode === "thinking") && openSourceEnabled && !hasImages) {
+    if (usesOpenSourceBrain) {
       try {
         const text = await callOpenSource(config.systemInstruction, toOpenAIMessages(history, message), temperature);
         return finish(text, []);
@@ -420,18 +599,29 @@ aiRouter.post("/chat", requireAuth, async (req: Request, res: Response) => {
       }
     }
 
+    // Trace label reflects what Gemini is doing here: grounding (search mode),
+    // vision (image uploads), or plain generation / MiniMax fallback.
+    const geminiLabel =
+      effectiveMode === "search" ? "GEMINI_SEARCH_GROUND" : hasImages ? "GEMINI_VISION_GENERATE" : "GEMINI_GENERATE";
     let response;
+    let gemT0 = Date.now();
+    console.log(`[${geminiLabel}] start (model=${modelName}). NOTE: the SDK may retry internally up to 5 attempts with backoff on 408/429/5xx.`);
     try {
       response = await ai.models.generateContent({ model: modelName, contents, config });
+      console.log(`[${geminiLabel}] end - ${secs(gemT0)} (model=${modelName})`);
     } catch (apiError: any) {
-      console.warn(`[AI] ${modelName} failed:`, apiError.message);
+      console.warn(`[${geminiLabel}] failed - ${secs(gemT0)} (model=${modelName}): ${apiError.message}`);
       if (modelName === "gemini-3.1-pro-preview") {
+        // Silent full-generation retry: pro-preview failure re-generates on flash.
         modelName = "gemini-3.5-flash";
+        gemT0 = Date.now();
+        console.log(`[${geminiLabel}] retry start (model=${modelName}, full re-generation after pro-preview failure)`);
         response = await ai.models.generateContent({
           model: modelName,
           contents,
           config: { ...config, thinkingConfig: { thinkingLevel: "LOW" } },
         });
+        console.log(`[${geminiLabel}] retry end - ${secs(gemT0)} (model=${modelName})`);
       } else {
         throw apiError;
       }
@@ -442,24 +632,207 @@ aiRouter.post("/chat", requireAuth, async (req: Request, res: Response) => {
     const sources =
       groundingChunks?.map((c: any) => ({ title: c.web?.title || "Search Source", uri: c.web?.uri || "#" })) || [];
 
-    // Search mode → Gemini grounded above; open-source model writes the answer.
-    if (effectiveMode === "search" && openSourceEnabled && !hasImages) {
-      try {
-        const augmented =
-          `Here is up-to-date information gathered from a Google Search to help you answer accurately:\n\n"""\n${responseText}\n"""\n\n` +
-          `Treat the information above as the source of truth for any facts, names, dates, or numbers, do not contradict it or add unverified facts. ` +
-          `Now respond to the student's request: ${message}`;
-        const text = await callOpenSource(config.systemInstruction, toOpenAIMessages(history, augmented), 0.5);
-        return finish(text, sources);
-      } catch (osErr: any) {
-        console.warn("[AI] search open-source failed, returning Gemini grounded answer:", osErr.message);
+    // Search mode ships Gemini's grounded answer directly. It is generated
+    // with the full teaching system prompt, so it is already complete; the old
+    // MiniMax rewrite step only re-generated the same content (measured: +38s
+    // on a 10s grounded answer) and was removed on 2026-07-02.
+    return finish(responseText, sources);
+  } catch (error: any) {
+    console.warn(`[CHAT] total - ${secs(chatT0)} (FAILED: ${error?.message || error})`);
+    console.error("Chat API error:", error);
+    res.status(500).json({ error: error.message || "An error occurred during content generation." });
+  }
+});
+
+/**
+ * Streaming chat (SSE over POST). The draft streams token by token; with
+ * Deep-check on, the examiner pass runs on the COMPLETE draft afterwards and
+ * the corrected final answer replaces it in the closing "done" event, so
+ * streaming never weakens the fact-check net (the 2026-07-02 draft-then-swap
+ * decision that superseded the June whole-answer-only rule).
+ *
+ * Events (data: JSON lines): {type:"delta",text} incremental chunk,
+ * {type:"checking"} examiner started, {type:"done",text,sources,verification?}
+ * final authoritative answer, {type:"fallback",reason} use plain /chat,
+ * {type:"error",error}. Cache hits emit their full text as one delta.
+ * Search, image, and no-open-source requests fall back to /chat, which keeps
+ * its Gemini paths and remains the safety net when the stream fails.
+ */
+aiRouter.post("/chat/stream", requireAuth, async (req: Request, res: Response) => {
+  const chatT0 = Date.now();
+  const send = (payload: Record<string, unknown>) => {
+    if (!res.destroyed) res.write(`data: ${JSON.stringify(payload)}\n\n`);
+  };
+  try {
+    const { message, history, mode, board, grade, language, preferredAnalogy } = req.body;
+    const uid = (req as any).userId as number;
+
+    res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+    res.setHeader("X-Accel-Buffering", "no");
+    res.flushHeaders?.();
+
+    const images = Array.isArray(req.body?.images)
+      ? req.body.images.filter((im: any) => im && im.data && im.mimeType).slice(0, 6)
+      : [];
+    const requestedMode = mode || "standard";
+    const effectiveMode = requestedMode === "standard" ? classifyQuery(message) : requestedMode;
+    const deepVerify = req.body?.deepVerify === true;
+
+    // Only the open-source text path streams; everything else uses /chat.
+    // Checked BEFORE the rate limit: a route fallback does no AI work, so it
+    // must not charge the student a token (the /chat retry pays the one token).
+    if (images.length > 0 || effectiveMode === "search" || !openSourceEnabled) {
+      console.log(`[CHAT_STREAM] fallback to /chat (mode=${effectiveMode}, images=${images.length}, openSource=${openSourceEnabled})`);
+      send({ type: "fallback", reason: "route" });
+      return res.end();
+    }
+
+    if (!rateLimit(`${uid}:chat`, 30)) {
+      send({ type: "error", error: "You're sending messages very fast. Take a breath and try again in a moment. 🌱" });
+      return res.end();
+    }
+
+    const isQuant = effectiveMode === "thinking";
+    const temperature = isQuant ? 0.3 : 0.6;
+    const cacheable = !Array.isArray(history) || history.length === 0;
+    const facets: CacheFacets = { mode: effectiveMode, board, grade, language, preferredAnalogy };
+    const cacheKey = cacheable ? makeCacheKey({ ...facets, message }) : "";
+    let queryEmbedding: number[] | null = null;
+
+    console.log(`[CHAT_STREAM] start (requested=${requestedMode}, effective=${effectiveMode}, deepVerify=${deepVerify}, cacheable=${cacheable})`);
+
+    // Serve a cached answer over the stream with the same Deep-check honesty
+    // as /chat: unverified hits are examined now and upgraded.
+    const streamCachedHit = async (
+      hit: { text: string; sources: any[]; verified: boolean },
+      upgrade: (verifiedText: string) => Promise<void>,
+      path: string
+    ) => {
+      send({ type: "delta", text: hit.text });
+      if (!deepVerify || hit.verified) {
+        send({ type: "done", text: hit.text, sources: hit.sources || [], ...(deepVerify ? { verification: "passed" } : {}) });
+      } else {
+        send({ type: "checking" });
+        const v = await verifyAnswer(message, hit.text);
+        if (v.verified) await upgrade(v.text);
+        send({
+          type: "done",
+          text: v.verified ? v.text : hit.text,
+          sources: hit.sources || [],
+          verification: v.verified ? "passed" : "unavailable",
+        });
+      }
+      console.log(`[CHAT_STREAM] total - ${secs(chatT0)} (${path})`);
+      res.end();
+    };
+
+    if (cacheable) {
+      const exact = memCache.get(cacheKey) || (await safe(() => cacheGetByKey(pool, cacheKey)));
+      if (exact) {
+        memCacheSet(cacheKey, exact);
+        return streamCachedHit(
+          exact,
+          async (verifiedText) => {
+            memCacheSet(cacheKey, { text: verifiedText, sources: exact.sources || [], verified: true });
+            await safe(() => cacheMarkVerified(pool, cacheKey, verifiedText));
+          },
+          "exact cache hit"
+        );
+      }
+      queryEmbedding = await embed(message);
+      if (queryEmbedding) {
+        const qTokens = topicTokens(message);
+        const candidates = (await safe(() => cacheCandidates(pool, facets))) || [];
+        let best: { cacheKey: string; text: string; sources: any[]; verified: boolean } | null = null;
+        let bestScore = 0;
+        for (const c of candidates) {
+          if (!c.embedding) continue;
+          if (!topicCompatible(qTokens, topicTokens(c.question))) continue;
+          const s = cosine(queryEmbedding, c.embedding);
+          if (s > bestScore) {
+            bestScore = s;
+            best = c;
+          }
+        }
+        if (best && bestScore >= SEMANTIC_THRESHOLD) {
+          const bestKey = best.cacheKey;
+          return streamCachedHit(
+            best,
+            async (verifiedText) => {
+              await safe(() => cacheMarkVerified(pool, bestKey, verifiedText));
+            },
+            `semantic cache hit (score ${bestScore.toFixed(3)})`
+          );
+        }
       }
     }
 
-    return finish(responseText, sources);
+    // RAG grounding, same rules as /chat (first-turn questions only).
+    let referenceContext: string | null = null;
+    if (queryEmbedding) {
+      referenceContext = await safe(() => retrieveContext(queryEmbedding, board));
+    }
+    const systemInstruction = buildSystemInstruction({ board, grade, language, preferredAnalogy }, referenceContext, isQuant);
+
+    // Stream the draft. Any failure here (timeout, HTTP error, empty stream)
+    // hands the request back to the client, which retries on /chat with
+    // avoidOpenSource so it goes straight to the Gemini fallback.
+    let draft = "";
+    try {
+      for await (const delta of streamOpenSource(systemInstruction, toOpenAIMessages(history, message), temperature)) {
+        draft += delta;
+        if (res.destroyed) break;
+        send({ type: "delta", text: delta });
+      }
+    } catch {
+      // If chunks already reached the student, the client keeps them visible
+      // and retries silently; "reason" tells it to skip MiniMax this time.
+      send({ type: "fallback", reason: "stream-failed" });
+      console.warn(`[CHAT_STREAM] total - ${secs(chatT0)} (stream failed, client falls back to /chat)`);
+      return res.end();
+    }
+    if (res.destroyed) {
+      console.log(`[CHAT_STREAM] total - ${secs(chatT0)} (client disconnected mid-stream)`);
+      return;
+    }
+
+    // Draft-then-swap: examiner pass on the complete draft, then cache + done.
+    let finalText = draft;
+    let verified = false;
+    if (deepVerify) {
+      send({ type: "checking" });
+      const v = await verifyAnswer(message, draft);
+      finalText = v.text;
+      verified = v.verified;
+    }
+    if (cacheable) {
+      memCacheSet(cacheKey, { text: finalText, sources: [], verified });
+      await safe(() =>
+        cacheUpsertFull(pool, {
+          cacheKey,
+          ...facets,
+          question: (message || "").toLowerCase().trim(),
+          embedding: queryEmbedding,
+          text: finalText,
+          sources: [],
+          verified,
+        })
+      );
+    }
+    send({
+      type: "done",
+      text: finalText,
+      sources: [],
+      ...(deepVerify ? { verification: verified ? "passed" : "unavailable" } : {}),
+    });
+    console.log(`[CHAT_STREAM] total - ${secs(chatT0)} (streamed, verify=${deepVerify ? (verified ? "passed" : "unavailable") : "off"})`);
+    res.end();
   } catch (error: any) {
-    console.error("Chat API error:", error);
-    res.status(500).json({ error: error.message || "An error occurred during content generation." });
+    console.warn(`[CHAT_STREAM] total - ${secs(chatT0)} (FAILED: ${error?.message || error})`);
+    send({ type: "error", error: error?.message || "An error occurred during content generation." });
+    res.end();
   }
 });
 
